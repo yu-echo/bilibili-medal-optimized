@@ -969,6 +969,15 @@
                     let targets = [];
                     await BAPI.vip_privilege_my().then((re) => {
                         if (re.code !== 0 || !re.data || !Array.isArray(re.data.list)) return;
+                        // B币券（type=1，每月 5 张）过期就白扔，剩 3 天内提醒
+                        const coupon = re.data.list.find(x => Number(x.type) === 1);
+                        if (coupon && coupon.expire_time) {
+                            const daysLeft = Math.ceil((coupon.expire_time * 1000 - ts_ms()) / 86400000);
+                            if (daysLeft >= 0 && daysLeft <= 3) {
+                                const d = new Date(coupon.expire_time * 1000);
+                                window.toast(`【大会员权益】B币券还有 ${daysLeft} 天过期（${d.getMonth() + 1}月${d.getDate()}日），记得去充电用掉`, 'error', 20000);
+                            }
+                        }
                         targets = re.data.list
                             .filter(x => Number(x.recive_state) === 1)
                             .filter(x => {

@@ -107,6 +107,33 @@ body: {"reason_id": 1}      // JSON，不需要 csrf
 
 成熟项目（BiliBiliToolPro / BiliExper）也一样领不到这些，它们只多做了一件事：**把漫画福利和漫画签到算进任务**。
 
+### 每月 5 张 B币券：领取状态能验，余额查不到
+
+`privilege/my` 里 `type=1` 的实测数据：
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| `recive_state` | `2` | **已领取** |
+| `state` | `1` | 已激活 |
+| `expire_time` | `1793376000` | **2026-10-31 过期** |
+| `next_receive_days` | `13` | 13 天后可领下月券 |
+
+**但「还剩几张」在 web 端查不到。** 试过的接口：
+
+| 接口 | 结果 |
+|---|---|
+| `POST pay.bilibili.com/paywallet/wallet/getUserWallet` | ✅ 可用，但 `couponBalance: 0` 是**通用优惠券**，不含 B币券 |
+| `pay.bilibili.com/bapi/coupon/list` | 404 |
+| `x/ugcpay/web/v2/trade/asset/web` | 404 |
+| `x/ugcpay/trade/elec/asset` | 404 |
+| 页面 `pay.bilibili.com/paywallet/wallet` | 404（web 端没有钱包页） |
+
+B币券余额只在 **APP「我的 → 我的钱包」** 里可见。券的实际用法是**充电时自动抵扣**。
+
+**所以「5 张」这个数量无法从 web 端验证**，只能确认「本月已领取、10-31 过期」。
+
+已加：券剩 3 天内时 toast 提醒（只读 `expire_time`，不涉及任何消费）。
+
 ### 漫画每日签到：接口还在，但参数变了（未做）
 
 `POST /twirp/activity.v1.Activity/ClockIn` 对 `platform` 试过 `web / ios / pc / h5 / android / 数字`，**全部返回**
