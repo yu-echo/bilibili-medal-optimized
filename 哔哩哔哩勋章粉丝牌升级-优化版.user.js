@@ -954,6 +954,17 @@
                 const now = ts_s();
                 let skip = {};
                 try { skip = JSON.parse(localStorage.getItem(SKIP_KEY) || '{}') || {}; } catch (e) { skip = {}; }
+                // 漫画大会员福利：独立接口，每月一次，与上面的 privilege 列表无关
+                await BAPI.manga_vip_reward().then((re) => {
+                    if (re.code === 0) {
+                        const n = re.data && re.data.amount ? ` × ${re.data.amount}` : '';
+                        window.toast(`【大会员权益】漫画漫读券领取成功${n}`, 'success');
+                    } else if (re.code === 1) {
+                        // 已领过或未达领取条件，静默
+                    } else {
+                        console.warn(`[大会员权益] 漫画福利 code=${re.code} ${re.msg || re.message}`);
+                    }
+                }, () => { });
                 try {
                     let targets = [];
                     await BAPI.vip_privilege_my().then((re) => {
@@ -1416,6 +1427,15 @@ const BilibiliAPI = {
                 platform: 'web',
                 csrf: csrf
             }
+        })
+    },
+    manga_vip_reward: () => {//漫画大会员福利（每月一次，独立于 vip/privilege/receive）
+        return BilibiliAPI.ajax({
+            url: "https://manga.bilibili.com/twirp/user.v1.User/GetVipReward",
+            method: "POST",
+            contentType: "application/json",
+            processData: false,
+            data: JSON.stringify({ reason_id: 1 })
         })
     },
     score_task_sign: () => {//大会员积分签到
