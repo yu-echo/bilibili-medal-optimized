@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         哔哩哔哩勋章粉丝牌升级
-// @version      1.15-opt
+// @version      1.16-opt
 // @description  哔哩哔哩获取亲密度（社区优化版）
 // @author       无夏不春风orz
 // @iconURL      https://www.bilibili.com/favicon.ico
@@ -259,6 +259,7 @@
                 medal_first_uid: [],
                 auto_share_watch: true,
                 auto_coin_add: false,
+                auto_vip_privilege: true,
             },
             CONFIG: {},
             loadConfig: async function () {
@@ -356,6 +357,13 @@
                     <input type="checkbox">
                     <span class="checkmark"></span>
                     <span class="setting-label">主站升级（随机投币）</span>
+                </label>
+            </div>
+            <div class="setting-item" data-toggle="auto_vip_privilege">
+                <label class="checkbox-container">
+                    <input type="checkbox">
+                    <span class="checkmark"></span>
+                    <span class="setting-label">大会员权益自动领取</span>
                 </label>
             </div>
             </div>
@@ -626,6 +634,7 @@
                 initCheckbox('auto_like', 'auto_like')
                 initCheckbox('auto_coin_add', 'auto_coin_add');
                 initCheckbox('auto_share_watch', 'auto_share_watch');
+                initCheckbox('auto_vip_privilege', 'auto_vip_privilege');
                 initCheckbox('medal_level_pass', 'medal_level_pass');
                 initCheckbox('sort', 'sort');
                 // 注意：hide_Toast 这个键名语义是反的（true = 弹出提示），保留原键名以兼容已保存配置
@@ -935,6 +944,60 @@
                     return MY_API.experience_add()
                 }
             },
+            // 大会员权益领取：只看 recive_state（1=未领取，2=已领取）。
+            // state 字段不能当判据——实测 state=0 表示「有权益但未领」，领成功后变 1，与直觉相反。
+            vip_privilege: async () => {
+                if (!(Live_info.vipType >= 1 && Live_info.vipStatus == 1)) return;
+                // 失败类型缓存：淘宝未绑定(69825)/超大会员(6034021)/活动过期(6034019)/不支持web(-400)
+                // 这些是前置条件不满足，每轮重试纯属浪费，记下来 7 天内不再请求
+                const SKIP_KEY = `${NAME}_VIP_SKIP`;
+                const now = ts_s();
+                let skip = {};
+                try { skip = JSON.parse(localStorage.getItem(SKIP_KEY) || '{}') || {}; } catch (e) { skip = {}; }
+                try {
+                    let targets = [];
+                    await BAPI.vip_privilege_my().then((re) => {
+                        if (re.code !== 0 || !re.data || !Array.isArray(re.data.list)) return;
+                        targets = re.data.list
+                            .filter(x => Number(x.recive_state) === 1)
+                            .filter(x => {
+                                const t = String(x.type);
+                                return !skip[t] || now - skip[t] > 7 * 86400;
+                            });
+                    }, () => { });
+                    if (!targets.length) {
+                        window.toast(`【大会员权益】当前无可领取项`);
+                    } else {
+                        let okCount = 0, failCount = 0;
+                        for (let i = 0; i < targets.length; i++) {
+                            const t = targets[i].type;
+                            await BAPI.vip_privilege_receive(t, Live_info.csrf_token).then((re) => {
+                                if (re.code === 0) {
+                                    okCount++;
+                                    delete skip[t];
+                                    window.toast(`【大会员权益】类型 ${t} 领取成功`, 'success');
+                                } else if (re.code === 69801 || re.code === 69818) {
+                                    // 已领过（69818 是"已领过，请到移动端查看"）
+                                    delete skip[t];
+                                } else {
+                                    failCount++;
+                                    skip[t] = now;
+                                    console.warn(`[大会员权益] type=${t} code=${re.code} ${re.message}`);
+                                }
+                            }, () => { });
+                            await sleep(3000);
+                        }
+                        if (okCount) window.toast(`【大会员权益】本轮领取 ${okCount} 项`, 'success');
+                        if (failCount) console.warn(`[大会员权益] ${failCount} 项有前置条件未满足，已记 7 天内跳过`);
+                    }
+                } catch (e) {
+                    console.error('[大会员权益] 异常', e);
+                }
+                try { localStorage.setItem(SKIP_KEY, JSON.stringify(skip)); } catch (e) { }
+                window.toast(`【大会员权益】将在6小时后重新运行...`)
+                await sleep(6 * 3600 * 1000)
+                return MY_API.vip_privilege()
+            },
             score_task_sign: async () => {//大会员自动签到
                 if (Live_info.vipType >= 1 && Live_info.vipStatus == 1) {
                     await BAPI.score_task_sign().then(async (re) => {
@@ -1016,11 +1079,20 @@
         };
         await MY_API.loadConfig()
         try {
+            // 同一标签页重载（刷新 / B站 SPA 路由切换）时 beforeunload 不一定触发，
+            // 会留下上一次的心跳标记，导致新实例把自己误判成"已在运行"直接退出、面板不出现。
+            // 用 sessionStorage 区分「本标签页重载」和「另一个标签页真的在跑」。
+            if (sessionStorage.getItem(`${NAME}_TAB`) === '1') {
+                MY_API.CONFIG.js_running_mark = 0;
+                MY_API.saveConfig();
+            }
+            sessionStorage.setItem(`${NAME}_TAB`, '1');
             const promiseInit = $.Deferred();
             const uniqueCheck = () => {
                 const t = Date.now();
-                if (t - MY_API.CONFIG.js_running_mark >= 0 && t - MY_API.CONFIG.js_running_mark <= 20e3) {
-                    window.toast('检测到脚本已经运行');
+                // 检测窗口只比写入间隔(5s)略大，避免刷新瞬间被自己上一次的标记挡住
+                if (t - MY_API.CONFIG.js_running_mark >= 0 && t - MY_API.CONFIG.js_running_mark <= 6e3) {
+                    window.toast('检测到另一个标签页正在运行本脚本。若没有其他标签页，等 10 秒后刷新即可', 'error', 15000);
                     return promiseInit.reject();
                 }
                 return promiseInit.resolve();
@@ -1107,6 +1179,9 @@
                 API.watch_share()
                 API.score_task_sign()
                 API.experience_add()
+            }
+            if (API.CONFIG.auto_vip_privilege) {
+                API.vip_privilege()
             }
             if (API.CONFIG.auto_coin_add) {
                 API.coin_add()
@@ -1322,6 +1397,23 @@ const BilibiliAPI = {
             url: "https://api.bilibili.com/x/vip/experience/add",
             method: "POST",
             data: {
+                csrf: csrf
+            }
+        })
+    },
+    vip_privilege_my: () => {//大会员权益列表（含每项 recive_state）
+        return BilibiliAPI.ajax({
+            url: "https://api.bilibili.com/x/vip/privilege/my",
+            method: "GET",
+        })
+    },
+    vip_privilege_receive: (type, csrf) => {//领取大会员权益，type: 1=B币券 2=会员购券 3=漫画福利券 4=包邮券 6=装扮体验卡
+        return BilibiliAPI.ajax({
+            url: "https://api.bilibili.com/x/vip/privilege/receive",
+            method: "POST",
+            data: {
+                type: type,
+                platform: 'web',
                 csrf: csrf
             }
         })
