@@ -13,9 +13,9 @@ on:
         type: boolean
         default: false
       max_light:
-        description: '本次最多点亮多少枚牌子'
+        description: '本次最多点亮多少枚牌子（200 = 不限）'
         type: string
-        default: '30'
+        default: '200'
 
 permissions:
   contents: write
@@ -59,7 +59,7 @@ jobs:
           SESSDATA_2: ${{ secrets.SESSDATA_2 }}
           BILI_JCT_2: ${{ secrets.BILI_JCT_2 }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          MAX_LIGHT: ${{ inputs.max_light || '30' }}
+          MAX_LIGHT: ${{ inputs.max_light || '200' }}
           DELAY_MS: '2000'
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node scripts/daily.mjs

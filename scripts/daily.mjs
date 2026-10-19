@@ -15,7 +15,7 @@
  * 环境变量（必填）：
  *   SESSDATA / BILI_JCT
  * 可选：
- *   MAX_LIGHT   每次最多点亮多少枚牌子，默认 30
+ *   MAX_LIGHT   每次最多点亮多少枚牌子，默认 200（实际等于不限）
  *   DELAY_MS    请求间隔毫秒，默认 2000
  *   DRY_RUN     =1 时只打印计划，不发请求
  */
@@ -27,7 +27,7 @@ import path from 'node:path';
 const CFG = {
   SESSDATA: process.env.SESSDATA || '',
   BILI_JCT: process.env.BILI_JCT || '',
-  MAX_LIGHT: Number(process.env.MAX_LIGHT || 30),
+  MAX_LIGHT: Number(process.env.MAX_LIGHT || 200),
   DELAY_MS: Number(process.env.DELAY_MS || 2000),
   DRY: process.env.DRY_RUN === '1',
   // 推送
@@ -488,6 +488,9 @@ async function taskMedalLight() {
     log('  ⏭️  全部已点亮');
     return;
   }
+
+  // 等级升序：中途被打断时，先把低等级的补上
+  unlit.sort((a, b) => Number(a.medal.level) - Number(b.medal.level));
 
   const todo = unlit.slice(0, CFG.MAX_LIGHT);
   if (unlit.length > todo.length) {
