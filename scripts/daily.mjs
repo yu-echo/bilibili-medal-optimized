@@ -30,10 +30,6 @@ const CFG = {
   MAX_LIGHT: Number(process.env.MAX_LIGHT || 30),
   DELAY_MS: Number(process.env.DELAY_MS || 2000),
   DRY: process.env.DRY_RUN === '1',
-  // cookie 失效时的降级登录（可选，不配就只报错不重登）
-  USERNAME: process.env.BILI_USERNAME || '',
-  PASSWORD: process.env.BILI_PASSWORD || '',
-  CAPTCHA_KEY: process.env.TWO_CAPTCHA_API_KEY || '',
   // 推送
   PUSH_TOKEN: process.env.PUSHPLUS_TOKEN || '',
   // cookie / 状态缓存目录（Actions 里用 actions/cache 持久化）
@@ -101,16 +97,15 @@ const sha256short = (s) => crypto.createHash('sha256').update(s).digest('hex').s
 let curIndex = 0; // 当前处理到第几个账号（0 起），用于缓存文件隔离
 const statePath = (name) => path.join(CFG.CACHE_DIR, `acct${curIndex + 1}_${name}`);
 
-/** 读取账号列表：支持 BILI_USER_N / BILI_PASS_N / SESSDATA_N / BILI_JCT_N，N 从 1 递增 */
+/** 读取账号列表：账号由 SESSDATA_N（或 .qr/acctN.json 本机扫码产物）决定，N 从 1 递增 */
 function loadAccounts() {
   const out = [];
   for (let i = 1; i <= 9; i++) {
-    const user = process.env[`BILI_USER_${i}`] || (i === 1 ? process.env.BILI_USERNAME : '') || '';
-    const pass = process.env[`BILI_PASS_${i}`] || (i === 1 ? process.env.BILI_PASSWORD : '') || '';
-    const sess = process.env[`SESSDATA_${i}`] || (i === 1 ? process.env.SESSDATA : '') || '';
-    const jct = process.env[`BILI_JCT_${i}`] || (i === 1 ? process.env.BILI_JCT : '') || '';
-    if (!user && !sess) continue;
-    out.push({ user, pass, sess, jct });
+    const qr = readJsonFile(path.join(process.cwd(), '.qr', `acct${i}.json`), null) || {};
+    const sess = process.env[`SESSDATA_${i}`] || qr.SESSDATA || (i === 1 ? process.env.SESSDATA : '') || '';
+    const jct = process.env[`BILI_JCT_${i}`] || qr.BILI_JCT || (i === 1 ? process.env.BILI_JCT : '') || '';
+    if (!sess) continue;
+    out.push({ no: i, sess, jct });
   }
   return out;
 }
@@ -177,112 +172,12 @@ async function push(title, bodyLines) {
   }
 }
 
-// ────────────────────────────── 密码登录（cookie 失效时降级） ──────────────────────────────
+// ────────────────────── cookie 失效处理 ──────────────────────
+// 密码登录已废弃：B 站 passport 对无浏览器设备历史的密码登录一律返回
+// status=2「本次登录环境存在风险, 需使用手机号进行验证或绑定」，
+// 极验打码通过、带 buvid3/buvid4 指纹均无法绕过（本地与 Actions 实测）。
+// 改为：本机扫码一次 → node scripts/qr-login.mjs --acct N --push
 
-const PASSPORT = 'https://passport.bilibili.com';
-
-/**
- * 2captcha 解极验 v3
- * B 站拿到的是 gt + challenge，和极验 v3 一致，method=geetest
- * 平均解算 30~60 秒
- */
-async function solveGeetest(gt, challenge, pageurl) {
-  if (!CFG.CAPTCHA_KEY) throw new Error('未配置 TWO_CAPTCHA_API_KEY，无法自动通过极验');
-  const submitUrl = 'https://2captcha.com/in.php?' + new URLSearchParams({
-    key: CFG.CAPTCHA_KEY, method: 'geetest', gt, challenge, pageurl, json: '1',
-  }).toString();
-  const sub = await (await fetch(submitUrl, { signal: AbortSignal.timeout(20000) })).json();
-  if (sub.status !== 1) throw new Error(`2captcha 提交失败: ${sub.request}`);
-
-  for (let i = 0; i < 40; i++) {
-    await sleep(5000);
-    const pollUrl = `https://2captcha.com/res.php?key=${CFG.CAPTCHA_KEY}&action=get&id=${sub.request}&json=1`;
-    const r = await (await fetch(pollUrl, { signal: AbortSignal.timeout(20000) })).json();
-    if (r.status === 1) return r.request;
-    if (r.request !== 'CAPCHA_NOT_READY') throw new Error(`2captcha 解算失败: ${r.request}`);
-  }
-  throw new Error('2captcha 解算超时（>200s）');
-}
-
-/** 账号密码 + 2captcha 打码登录，成功后把新 cookie 写进缓存 */
-async function loginByPassword() {
-  if (!CFG.USERNAME || !CFG.PASSWORD) throw new Error('未配置 BILI_USERNAME / BILI_PASSWORD');
-  log('  🔑 cookie 失效，尝试账号密码登录 …');
-
-  const capRes = await (await fetch(`${PASSPORT}/x/passport-login/captcha?source=main_web&t=${Date.now()}`)).json();
-  if (capRes.code !== 0) throw new Error(`取验证码配置失败 code=${capRes.code}`);
-  const { token, geetest } = capRes.data;
-  log(`  极验 ${capRes.data.type}，提交打码（约 30~60 秒）…`);
-
-  const solved = await solveGeetest(geetest.gt, geetest.challenge, `${PASSPORT}/login`);
-  log('  ✅ 打码完成，提交登录 …');
-
-  const keyRes = await (await fetch(`${PASSPORT}/x/passport-login/web/key?_=${Date.now()}`)).json();
-  const { hash, key: pubKey } = keyRes.data;
-  const encPwd = crypto
-    .publicEncrypt({ key: pubKey, padding: crypto.constants.RSA_PKCS1_PADDING }, Buffer.from(hash + CFG.PASSWORD))
-    .toString('base64');
-
-  const body = new URLSearchParams({
-    username: CFG.USERNAME,
-    password: encPwd,
-    keep_sec: 'true',
-    token,
-    challenge: solved.geetest_challenge || geetest.challenge,
-    validate: solved.geetest_validate,
-    seccode: solved.geetest_seccode,
-    go_url: 'https://www.bilibili.com/',
-    source: 'main_web',
-  });
-
-  const res = await fetch(`${PASSPORT}/x/passport-login/web/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': UA, referer: `${PASSPORT}/login` },
-    body: body.toString(),
-    redirect: 'manual',
-  });
-
-  const j = await res.json().catch(() => ({}));
-  let newSess = '', newJct = '';
-
-  // 脱敏诊断：只打印结构，不打印任何值
-  const d = j.data || {};
-  log(`  [debug] login code=${j.code} msg=${j.message || ''} dataKeys=[${Object.keys(d).join(',')}]`);
-  log(`  [debug] status=${d.status ?? 'n/a'} | cookie_info=${d.cookie_info ? 'yes' : 'no'} | url=${d.url ? 'yes' : 'no'} | setCookie=${typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie().length : 'n/a'}`);
-  if (d.cookie_info) {
-    log(`  [debug] cookie_info keys=[${Object.keys(d.cookie_info).join(',')}] cookies=${(d.cookie_info.cookies || []).length}`);
-    if (Array.isArray(d.cookie_info.cookies)) {
-      log(`  [debug] cookie names=[${d.cookie_info.cookies.map((c) => c.name).join(',')}]`);
-    }
-  }
-  // B 站登录成功时 cookie 放在响应体 data.cookie_info.cookies 里，不在 Set-Cookie 头
-  const infoCookies = j?.data?.cookie_info?.cookies;
-  if (Array.isArray(infoCookies)) {
-    for (const c of infoCookies) {
-      if (c.name === 'SESSDATA') newSess = c.value;
-      if (c.name === 'bili_jct') newJct = c.value;
-    }
-  }
-  // 兜底：万一以后改成用 Set-Cookie 下发
-  if (!newSess) {
-    const rawCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
-    for (const c of rawCookies) {
-      const m1 = c.match(/^SESSDATA=([^;]+)/);
-      const m2 = c.match(/^bili_jct=([^;]+)/);
-      if (m1) newSess = m1[1];
-      if (m2) newJct = m2[1];
-    }
-  }
-
-  if (!newSess) {
-    throw new Error(`登录失败 code=${j.code ?? '?'} ${j.message || j.data?.message || '响应里没有 SESSDATA'}`);
-  }
-
-  CFG.SESSDATA = newSess;
-  if (newJct) CFG.BILI_JCT = newJct;
-  writeJsonFile(statePath('cookie.json'), { SESSDATA: CFG.SESSDATA, BILI_JCT: CFG.BILI_JCT });
-  log('  ✅ 密码登录成功，新 cookie 已写入缓存');
-}
 
 // ────────────────────────────── 登录 & 准备 ──────────────────────────────
 
@@ -301,29 +196,27 @@ async function checkLogin() {
 }
 
 async function bootstrap() {
-  log('[1/6] \u767b\u5f55\u68c0\u67e5 \u2026');
+  log('[1/6] 登录检查 …');
 
-  // \u7f13\u5b58\u91cc\u7684 cookie \u4f18\u5148\uff1a\u5bc6\u7801\u767b\u5f55\u62ff\u5230\u7684\u65b0 cookie \u6bd4 Secret \u91cc\u7684\u65b0
-  const cached = readJsonFile(statePath('cookie.json'), null);
+  // cookie 来源优先级：Actions 缓存 → 本机扫码产物(.qr/) → 环境变量 Secrets
+  const qrFile = path.join(process.cwd(), '.qr', `acct${curIndex + 1}.json`);
+  const cached = readJsonFile(statePath('cookie.json'), null) || readJsonFile(qrFile, null);
   if (cached && cached.SESSDATA) {
     CFG.SESSDATA = cached.SESSDATA;
     if (cached.BILI_JCT) CFG.BILI_JCT = cached.BILI_JCT;
-    log('  \u4f7f\u7528\u7f13\u5b58\u4e2d\u7684 cookie');
+    log('  使用缓存中的 cookie');
   }
-  if ((!CFG.SESSDATA || !CFG.BILI_JCT) && !(CFG.USERNAME && CFG.PASSWORD)) {
-    throw new Error('\u7f3a\u5c11 SESSDATA / BILI_JCT\uff0c\u4e14\u672a\u914d\u7f6e BILI_USERNAME / BILI_PASSWORD');
+  if (!CFG.SESSDATA) {
+    throw new Error(
+      `缺少账号 ${curIndex + 1} 的 cookie：请在本机运行  node scripts/qr-login.mjs --acct ${curIndex + 1} --push`
+    );
   }
 
-  let nav = await checkLogin();
+  const nav = await checkLogin();
   if (!nav) {
-    // cookie \u5931\u6548 \u2192 \u8d26\u53f7\u5bc6\u7801 + 2captcha \u6253\u7801\u91cd\u767b
-    try {
-      await loginByPassword();
-      nav = await checkLogin();
-    } catch (e) {
-      throw new Error(`cookie \u5df2\u5931\u6548\uff0c\u5bc6\u7801\u767b\u5f55\u4e5f\u5931\u8d25\uff1a${e.message}`);
-    }
-    if (!nav) throw new Error('\u5bc6\u7801\u767b\u5f55\u540e\u4ecd\u672a\u901a\u8fc7\u6821\u9a8c\uff08\u53ef\u80fd\u89e6\u53d1\u4e86\u98ce\u63a7\uff09');
+    throw new Error(
+      `账号 ${curIndex + 1} 的 cookie 已失效：请在本机运行  node scripts/qr-login.mjs --acct ${curIndex + 1} --push  重新扫码`
+    );
   }
 
   // \u8bb0\u5f55\u9996\u6b21\u8ba4\u8bc1\u65e5\u671f\uff08SESSDATA \u6362\u4e86\u5c31\u91cd\u7f6e\uff09
@@ -693,19 +586,17 @@ async function main() {
 
   const accounts = loadAccounts();
   if (!accounts.length) {
-    throw new Error('没有可用账号：请配 SESSDATA_1/BILI_JCT_1 或 BILI_USER_1/BILI_PASS_1（多账号递增编号）');
+    throw new Error('没有可用账号：请先在本机运行 node scripts/qr-login.mjs --acct 1 --push 扫码登录');
   }
   log(`检测到 ${accounts.length} 个账号`);
 
   const t0 = Date.now();
   const results = [];
   for (let i = 0; i < accounts.length; i++) {
-    curIndex = i;
+    curIndex = accounts[i].no - 1;
     Object.assign(CFG, {
       SESSDATA: accounts[i].sess,
       BILI_JCT: accounts[i].jct,
-      USERNAME: accounts[i].user,
-      PASSWORD: accounts[i].pass,
     });
     Object.assign(state, { mid: 0, uname: '', buvid3: '', mixin: '' });
     Object.assign(stat, { ok: 0, skip: 0, fail: 0 });

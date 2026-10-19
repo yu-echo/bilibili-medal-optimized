@@ -1,6 +1,8 @@
 # cookie / 认证状态缓存（含 SESSDATA，绝不能提交）
 .cookie-cache/
 .cookies.json
+# 本机扫码登录产物
+.qr/
 
 node_modules/
 *.log

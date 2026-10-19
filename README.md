@@ -84,37 +84,41 @@
 
 ### 配置
 
-打开 `https://github.com/yu-echo/bilibili-medal-optimized/settings/secrets/actions`，添加：
+**不用手动抓 cookie**，一条命令扫码搞定：
+
+```bash
+node scripts/qr-login.mjs --acct 1 --push
+```
+
+它会弹出一张二维码，用 B 站手机客户端扫一下 → 自动把 `SESSDATA_1` / `BILI_JCT_1` 写进 GitHub Secrets。
+两个账号就 `--acct 2` 再来一次。
+
+剩下只有一个可选项：
 
 | Name | 必填 | 值 |
 |---|---|---|
-| `SESSDATA` | ✅ | F12 → Application → Cookies → `https://www.bilibili.com` → 找 `SESSDATA` |
-| `BILI_JCT` | ✅ | 同一栏里的 `bili_jct` |
-| `PUSHPLUS_TOKEN` | 推荐 | [pushplus.plus](https://www.pushplus.plus/) 微信扫码拿 token，推送用 |
-| `BILI_USERNAME` | 可选 | 手机号/账号，cookie 过期时自动重登用 |
-| `BILI_PASSWORD` | 可选 | 账号密码（配合打码） |
-| `TWO_CAPTCHA_API_KEY` | 可选 | [2captcha.com](https://2captcha.com/) 的 key，约 1 分钱/次 |
-
-然后 Actions → 「B站每日任务」→ Run workflow，先勾 `dry_run` 空跑一次确认登录通过。
+| `PUSHPLUS_TOKEN` | 推荐 | [pushplus.plus](https://www.pushplus.plus/) 微信扫码拿 token |
 
 ### cookie 过期怎么办
 
-支持**自动降级重登**，不需要你手动换 cookie：
+**不再支持账号密码自动重登** —— 2026-10 实测，B 站 passport 对「无浏览器设备历史」的密码登录一律返回：
 
 ```
-cookie 失效 → GET /x/passport-login/captcha 拿 gt+challenge（极验 v3）
-           → 2captcha 解算（约 30~60 秒）
-           → GET /x/passport-login/web/key 拿 RSA 公钥 + hash
-           → 密码加密 = RSA(hash + password)，POST 登录
-           → 从 Set-Cookie 抓新的 SESSDATA / bili_jct，写进 .cookie-cache
+code=0  message="OK"
+data.status=2  data.message="本次登录环境存在风险, 需使用手机号进行验证或绑定"
+data.cookie_info 不存在，Set-Cookie 为空
 ```
 
-新 cookie 用 `actions/cache` 跨运行保存，**下次直接复用，不会每次都打码**。只有真的失效了才花那 1 分钱。
+极验打码通过也没用，带上 `buvid3`/`buvid4` 设备指纹也没用，**本机和 GitHub Actions 机房 IP 表现完全一致**。
+风控锁在账号侧，要求手机号验证/绑定，无法自动化。
 
-⚠️ 三个前提：
-1. 必须配 `BILI_USERNAME` / `BILI_PASSWORD` / `TWO_CAPTCHA_API_KEY`，少一个就走不了这条路
-2. 打码会增加登录 30~60 秒耗时
-3. **这部分没有实测过** —— B 站登录接口已验证可用（见下），但完整登录流程会消耗真实验证码并改变登录态，我没在你的账号上跑过
+所以策略是：**cookie 失效时推送会提醒你，重新跑一次扫码命令即可**
+
+```bash
+node scripts/qr-login.mjs --acct 1 --push
+```
+
+正常情况下一份 SESSDATA 能撑几个月，基本不需要频繁操作。
 
 ### 推送格式
 
