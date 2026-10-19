@@ -1,0 +1,48 @@
+name: B站每日任务
+
+on:
+  schedule:
+    # UTC 01:00 = 北京时间 09:00。避开整点，Actions 定时队列在整点最容易拥堵。
+    # 亲密度每天 0 点重置，这里不卡零点：Actions 的 cron 本来就不保证准时，
+    # 而且点亮/权益这些任务对时间不敏感。
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只打印计划，不发请求'
+        type: boolean
+        default: false
+      max_light:
+        description: '本次最多点亮多少枚牌子'
+        type: string
+        default: '30'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bili-daily
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 运行每日任务
+        env:
+          SESSDATA: ${{ secrets.SESSDATA }}
+          BILI_JCT: ${{ secrets.BILI_JCT }}
+          MAX_LIGHT: ${{ inputs.max_light || '30' }}
+          DELAY_MS: '2000'
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: node scripts/daily.mjs
