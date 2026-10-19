@@ -480,12 +480,16 @@ async function taskMedalLight() {
     return;
   }
 
-  const unlit = medals.filter((m) => Number(m.medal.is_lighted) === 0);
-  const lit = medals.length - unlit.length;
-  log(`  共 ${medals.length} 枚｜已点亮 ${lit}｜未点亮 ${unlit.length}`);
+  const unlitAll = medals.filter((m) => Number(m.medal.is_lighted) === 0);
+  const lit = medals.length - unlitAll.length;
+  // 点赞点亮只在直播间开着时生效，没开播的房间点了也白点（接口仍返回 code=0）
+  const unlit = unlitAll.filter((m) => Number(m.room_info?.living_status) === 1);
+  const offAir = unlitAll.length - unlit.length;
+  log(`  共 ${medals.length} 枚｜已点亮 ${lit}｜未点亮 ${unlitAll.length}`);
+  if (offAir) log(`  其中 ${offAir} 枚主播未开播，点亮无效，跳过（等开播后自动补）`);
 
   if (!unlit.length) {
-    log('  ⏭️  全部已点亮');
+    log('  ⏭️  没有可点亮的（未点亮的都不在播）');
     return;
   }
 
