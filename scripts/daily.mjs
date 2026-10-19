@@ -178,6 +178,65 @@ async function push(title, bodyLines) {
 // 极验打码通过、带 buvid3/buvid4 指纹均无法绕过（本地与 Actions 实测）。
 // 改为：本机扫码一次 → node scripts/qr-login.mjs --acct N --push
 
+/** 扫码地址转成可内联进推送的 PNG data URI；qrcode 装不上时返回 null */
+async function makeQrDataUri(text) {
+  try {
+    const { default: QRCode } = await import('qrcode');
+    return await QRCode.toDataURL(text, { width: 420, margin: 2 });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * cookie 失效时把登录二维码推到微信。
+ * 二维码有效期约 3 分钟，所以同时给出本机命令作为兜底。
+ */
+async function pushLoginQr(acctNo) {
+  if (!CFG.PUSH_TOKEN || CFG.DRY) return;
+  try {
+    const gen = await (
+      await fetch('https://passport.bilibili.com/x/passport-login/web/qrcode/generate?source=main-fe-header', {
+        headers: { 'user-agent': UA, referer: 'https://www.bilibili.com/' },
+        signal: AbortSignal.timeout(15000),
+      })
+    ).json();
+    if (gen.code !== 0 || !gen.data?.url) {
+      warn(`  ⚠️  取登录二维码失败 code=${gen.code}`);
+      return;
+    }
+    const dataUri = await makeQrDataUri(gen.data.url);
+    const cmd = `node scripts/qr-login.mjs --acct ${acctNo} --push`;
+    const html = dataUri
+      ? `<div style="font-size:14px;line-height:1.7">
+<p><b>账号 ${acctNo} 的 cookie 已失效</b>，今天没能跑任务。</p>
+<p>下面是登录二维码，<b>3 分钟内有效</b>，用 B 站手机客户端「扫一扫」：</p>
+<p style="text-align:center"><img src="${dataUri}" style="width:230px;height:230px" /></p>
+<p style="color:#c00">扫完不会自动写回 GitHub，还需要在电脑上跑一次：</p>
+<p style="background:#f5f5f5;padding:8px;border-radius:4px;font-family:monospace;font-size:13px">${cmd}</p>
+<p style="color:#888;font-size:12px">二维码过期了也不用重跑这条推送，直接在电脑上执行上面的命令会生成新的。</p>
+</div>`
+      : `<div>账号 ${acctNo} 的 cookie 已失效。请在电脑上执行：<br><code>${cmd}</code></div>`;
+
+    const res = await fetch('https://www.pushplus.plus/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        token: CFG.PUSH_TOKEN,
+        title: `B站账号${acctNo}掉线，扫码恢复`,
+        content: html,
+        template: 'html',
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const j = await res.json();
+    if (j.code === 200) log('  📨 登录二维码已推送');
+    else warn(`  ⚠️  二维码推送失败 code=${j.code} ${j.msg}`);
+  } catch (e) {
+    warn('  ⚠️  二维码推送异常:', e.message);
+  }
+}
+
 
 // ────────────────────────────── 登录 & 准备 ──────────────────────────────
 
@@ -214,6 +273,8 @@ async function bootstrap() {
 
   const nav = await checkLogin();
   if (!nav) {
+    // 掉线了：先把二维码推到微信，再中止这个账号
+    await pushLoginQr(curIndex + 1);
     throw new Error(
       `账号 ${curIndex + 1} 的 cookie 已失效：请在本机运行  node scripts/qr-login.mjs --acct ${curIndex + 1} --push  重新扫码`
     );

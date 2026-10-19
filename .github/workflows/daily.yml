@@ -47,6 +47,10 @@ jobs:
           restore-keys: |
             bili-cache-
 
+      # 掉线时要把登录二维码画成图推给微信，qrcode 是唯一的运行期依赖
+      - name: 安装推送依赖
+        run: npm install qrcode --no-save --no-audit --no-fund
+
       - name: 运行每日任务
         env:
           # 账号 cookie：由本机 `node scripts/qr-login.mjs --acct N --push` 扫码写入
