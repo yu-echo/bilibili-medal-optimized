@@ -260,6 +260,7 @@
                 auto_share_watch: true,
                 auto_coin_add: false,
                 auto_vip_privilege: true,
+                auto_silver2coin: true,
             },
             CONFIG: {},
             loadConfig: async function () {
@@ -364,6 +365,13 @@
                     <input type="checkbox">
                     <span class="checkmark"></span>
                     <span class="setting-label">大会员权益自动领取</span>
+                </label>
+            </div>
+            <div class="setting-item" data-toggle="auto_silver2coin">
+                <label class="checkbox-container">
+                    <input type="checkbox">
+                    <span class="checkmark"></span>
+                    <span class="setting-label">银瓜子自动兑换硬币</span>
                 </label>
             </div>
             </div>
@@ -635,6 +643,7 @@
                 initCheckbox('auto_coin_add', 'auto_coin_add');
                 initCheckbox('auto_share_watch', 'auto_share_watch');
                 initCheckbox('auto_vip_privilege', 'auto_vip_privilege');
+                initCheckbox('auto_silver2coin', 'auto_silver2coin');
                 initCheckbox('medal_level_pass', 'medal_level_pass');
                 initCheckbox('sort', 'sort');
                 // 注意：hide_Toast 这个键名语义是反的（true = 弹出提示），保留原键名以兼容已保存配置
@@ -1018,16 +1027,39 @@
                 await sleep(6 * 3600 * 1000)
                 return MY_API.vip_privilege()
             },
+            // 银瓜子兑换硬币：700 银瓜子换 1 硬币，每日 1 次，过期不换就白放着
+            silver2coin: async () => {
+                try {
+                    let left = 0, silver = 0, coin = 0;
+                    await BAPI.exchange_status().then((re) => {
+                        if (re.code !== 0 || !re.data) return;
+                        silver = re.data.silver;
+                        coin = re.data.coin;
+                        left = Number(re.data.silver_2_coin_left) || 0;
+                    }, () => { });
+                    if (left <= 0) {
+                        window.toast(`【银瓜子兑换】今日已兑换过`);
+                    } else {
+                        await BAPI.silver2coin(Live_info.csrf_token).then((re) => {
+                            if (re.code === 0 && re.data) {
+                                window.toast(`【银瓜子兑换】成功：银瓜子 ${silver}→${re.data.silver}，硬币 ${coin}→${re.data.coin}`, 'success');
+                            } else {
+                                window.toast(`【银瓜子兑换】失败：${re.message}`, 'error');
+                            }
+                        }, () => { });
+                    }
+                } catch (e) {
+                    console.error('[银瓜子兑换] 异常', e);
+                }
+                window.toast(`【银瓜子兑换】将在6小时后重新运行...`)
+                await sleep(6 * 3600 * 1000)
+                return MY_API.silver2coin()
+            },
             score_task_sign: async () => {//大会员自动签到
                 if (Live_info.vipType >= 1 && Live_info.vipStatus == 1) {
                     await BAPI.score_task_sign().then(async (re) => {
                         if (re.code == 0 && re.message == "success") {
                             window.toast(`【大会员签到】大会员签到成功`, 'success');
-                            await BAPI.vip_point_task_combine().then((r) => {
-                                if (r.code == 0) {
-                                    window.toast(`【大会员签到】大会员积分：${r.data.point_info.point}`, 'success');
-                                }
-                            }, () => { })
                         }
                     }, () => { });
                     window.toast(`【大会员签到】将在12小时后重新运行...`)
@@ -1202,6 +1234,9 @@
             }
             if (API.CONFIG.auto_vip_privilege) {
                 API.vip_privilege()
+            }
+            if (API.CONFIG.auto_silver2coin) {
+                API.silver2coin()
             }
             if (API.CONFIG.auto_coin_add) {
                 API.coin_add()
@@ -1453,10 +1488,20 @@ const BilibiliAPI = {
             method: "POST",
         })
     },
-    vip_point_task_combine: () => {//大会员积分查询
+    exchange_status: () => {//银瓜子/硬币兑换状态（含今日剩余兑换次数）
         return BilibiliAPI.ajax({
-            url: "https://api.bilibili.com/x/vip/point/task/combine",
+            url: "https://api.live.bilibili.com/pay/v1/Exchange/getStatus",
             method: "GET",
+        })
+    },
+    silver2coin: (csrf) => {//银瓜子兑换硬币，700 银瓜子 = 1 硬币，每日 1 次
+        return BilibiliAPI.ajax({
+            url: "https://api.live.bilibili.com/pay/v1/Exchange/silver2coin",
+            method: "POST",
+            data: {
+                csrf: csrf,
+                platform: 'web'
+            }
         })
     },
 }

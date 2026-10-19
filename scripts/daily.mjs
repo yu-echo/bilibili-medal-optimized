@@ -91,7 +91,7 @@ async function bootstrap() {
   if (!CFG.SESSDATA || !CFG.BILI_JCT) {
     throw new Error('缺少 SESSDATA 或 BILI_JCT 环境变量');
   }
-  log('[1/5] 登录检查 …');
+  log('[1/6] 登录检查 …');
   const nav = await http('https://api.bilibili.com/x/web-interface/nav', { referer: 'https://www.bilibili.com/' });
   if (nav.code !== 0 || !nav.data || !nav.data.isLogin) {
     throw new Error(`登录失效（code=${nav.code} ${nav.message}），请更新 SESSDATA / BILI_JCT`);
@@ -120,7 +120,7 @@ async function bootstrap() {
 // ────────────────────────────── 1. 大会员权益 ──────────────────────────────
 
 async function taskVipPrivilege(isVip) {
-  log('[2/5] 大会员权益 …');
+  log('[2/6] 大会员权益 …');
   if (!isVip) {
     log('  ⏭️  非大会员，跳过');
     return;
@@ -214,7 +214,7 @@ async function taskVipPrivilege(isVip) {
 // ────────────────────────────── 2. 大会员经验 + 积分 ──────────────────────────────
 
 async function taskVipMisc(isVip) {
-  log('[3/5] 大会员经验 / 积分签到 …');
+  log('[3/6] 大会员经验 / 积分签到 …');
   if (!isVip) {
     log('  ⏭️  非大会员，跳过');
     return;
@@ -273,7 +273,7 @@ async function likeMedal(roomId, ruid, clickTime = 30) {
 }
 
 async function taskMedalLight() {
-  log('[4/5] 粉丝牌点亮 …');
+  log('[4/6] 粉丝牌点亮 …');
   let medals = [];
   try {
     medals = await getMedals();
@@ -330,10 +330,56 @@ async function taskMedalLight() {
   }
 }
 
-// ────────────────────────────── 4. 主站观看 + 分享 ──────────────────────────────
+// ────────────────────────────── 4. 银瓜子兑换硬币 ──────────────────────────────
+
+async function taskSilver2Coin() {
+  log('[5/6] 银瓜子兑换硬币 …');
+  let st;
+  try {
+    st = await http('https://api.live.bilibili.com/pay/v1/Exchange/getStatus');
+  } catch (e) {
+    warn('  ⚠️  查兑换状态失败:', e.message);
+    return;
+  }
+  if (st.code !== 0 || !st.data) {
+    warn(`  ⚠️  查兑换状态异常 code=${st.code} ${st.message}`);
+    return;
+  }
+  const d = st.data;
+  log(`  银瓜子 ${d.silver}｜硬币 ${d.coin}｜今日剩余兑换次数 ${d.silver_2_coin_left}`);
+
+  if (Number(d.silver_2_coin_left) <= 0) {
+    stat.skip++;
+    log('  ⏭️  今日已兑换过');
+    return;
+  }
+  if (CFG.DRY) {
+    log('  [dry] 兑换 700 银瓜子 → 1 硬币');
+    return;
+  }
+  try {
+    const r = await http(
+      `https://api.live.bilibili.com/pay/v1/Exchange/silver2coin?csrf=${CFG.BILI_JCT}&platform=web`,
+      { method: 'POST' }
+    );
+    if (r.code === 0 && r.data) {
+      stat.ok++;
+      log(`  ✅ 兑换成功：银瓜子 ${d.silver} → ${r.data.silver}，硬币 ${d.coin} → ${r.data.coin}`);
+    } else {
+      stat.fail++;
+      warn(`  ⚠️  兑换失败 code=${r.code} ${r.message}`);
+    }
+  } catch (e) {
+    stat.fail++;
+    warn('  ⚠️  兑换异常:', e.message);
+  }
+  await sleep(CFG.DELAY_MS);
+}
+
+// ────────────────────────────── 5. 主站观看 + 分享 ──────────────────────────────
 
 async function taskWatchShare() {
-  log('[5/5] 主站观看 + 分享 …');
+  log('[6/6] 主站观看 + 分享 …');
   let item;
   try {
     const rcm = await http('https://api.bilibili.com/x/web-interface/index/top/rcmd', { referer: 'https://www.bilibili.com/' });
@@ -393,6 +439,7 @@ async function main() {
   await taskVipPrivilege(vip);
   await taskVipMisc(vip);
   await taskMedalLight();
+  await taskSilver2Coin();
   await taskWatchShare();
 
   const sec = ((Date.now() - t0) / 1000).toFixed(1);
