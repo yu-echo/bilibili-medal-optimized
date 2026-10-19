@@ -242,16 +242,31 @@ async function loginByPassword() {
     redirect: 'manual',
   });
 
-  const rawCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
-  let newSess = '', newJct = '';
-  for (const c of rawCookies) {
-    const m1 = c.match(/^SESSDATA=([^;]+)/);
-    const m2 = c.match(/^bili_jct=([^;]+)/);
-    if (m1) newSess = m1[1];
-    if (m2) newJct = m2[1];
-  }
   const j = await res.json().catch(() => ({}));
-  if (!newSess) throw new Error(`登录失败 code=${j.code ?? '?'} ${j.message || ''}`);
+  let newSess = '', newJct = '';
+
+  // B 站登录成功时 cookie 放在响应体 data.cookie_info.cookies 里，不在 Set-Cookie 头
+  const infoCookies = j?.data?.cookie_info?.cookies;
+  if (Array.isArray(infoCookies)) {
+    for (const c of infoCookies) {
+      if (c.name === 'SESSDATA') newSess = c.value;
+      if (c.name === 'bili_jct') newJct = c.value;
+    }
+  }
+  // 兜底：万一以后改成用 Set-Cookie 下发
+  if (!newSess) {
+    const rawCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    for (const c of rawCookies) {
+      const m1 = c.match(/^SESSDATA=([^;]+)/);
+      const m2 = c.match(/^bili_jct=([^;]+)/);
+      if (m1) newSess = m1[1];
+      if (m2) newJct = m2[1];
+    }
+  }
+
+  if (!newSess) {
+    throw new Error(`登录失败 code=${j.code ?? '?'} ${j.message || j.data?.message || '响应里没有 SESSDATA'}`);
+  }
 
   CFG.SESSDATA = newSess;
   if (newJct) CFG.BILI_JCT = newJct;
