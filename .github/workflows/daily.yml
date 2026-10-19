@@ -16,6 +16,10 @@ on:
         description: '本次最多点亮多少枚牌子（200 = 不限）'
         type: string
         default: '200'
+      watch_top:
+        description: '每个账号最多挂几个直播间的观看任务（0 = 不挂）'
+        type: string
+        default: '4'
 
 permissions:
   contents: write
@@ -27,7 +31,7 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -63,6 +67,23 @@ jobs:
           DELAY_MS: '2000'
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node scripts/daily.mjs
+
+      # 直播亲密度：对齐上游 BiliBiliToolPro 的 LiveFansMedal 任务
+      # 只挂「开播中 + 已点亮 + 当天观看任务未满」的房间，高等级优先，多枚并行。
+      # 2026-04 改版：观看满 15 分钟 +1 亲密度、每日上限 10 次，故每枚至少挂 15 分钟。
+      # 挂机失败不影响前面的点亮结果（这一步单独失败也只是 job 标红）。
+      - name: 直播观看亲密度（上游方案）
+        if: ${{ (inputs.watch_top || '4') != '0' }}
+        continue-on-error: true
+        env:
+          SESSDATA_1: ${{ secrets.SESSDATA_1 }}
+          BILI_JCT_1: ${{ secrets.BILI_JCT_1 }}
+          SESSDATA_2: ${{ secrets.SESSDATA_2 }}
+          BILI_JCT_2: ${{ secrets.BILI_JCT_2 }}
+          WATCH_TOP: ${{ inputs.watch_top || '4' }}
+          WATCH_HEARTBEATS: '16'
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: node scripts/watch.mjs
 
       # GitHub 会在仓库连续 60 天无提交时自动停用 scheduled workflow。
       # 每月 1 号打一个空提交保活，避免悄悄停掉。
