@@ -245,6 +245,16 @@ async function loginByPassword() {
   const j = await res.json().catch(() => ({}));
   let newSess = '', newJct = '';
 
+  // 脱敏诊断：只打印结构，不打印任何值
+  const d = j.data || {};
+  log(`  [debug] login code=${j.code} msg=${j.message || ''} dataKeys=[${Object.keys(d).join(',')}]`);
+  log(`  [debug] status=${d.status ?? 'n/a'} | cookie_info=${d.cookie_info ? 'yes' : 'no'} | url=${d.url ? 'yes' : 'no'} | setCookie=${typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie().length : 'n/a'}`);
+  if (d.cookie_info) {
+    log(`  [debug] cookie_info keys=[${Object.keys(d.cookie_info).join(',')}] cookies=${(d.cookie_info.cookies || []).length}`);
+    if (Array.isArray(d.cookie_info.cookies)) {
+      log(`  [debug] cookie names=[${d.cookie_info.cookies.map((c) => c.name).join(',')}]`);
+    }
+  }
   // B 站登录成功时 cookie 放在响应体 data.cookie_info.cookies 里，不在 Set-Cookie 头
   const infoCookies = j?.data?.cookie_info?.cookies;
   if (Array.isArray(infoCookies)) {
