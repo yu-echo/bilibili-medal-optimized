@@ -98,7 +98,22 @@ function wbiQuery(params) {
 // ────────────────────────────── 推送 & 状态缓存 ──────────────────────────────
 
 const sha256short = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
-const statePath = (name) => path.join(CFG.CACHE_DIR, name);
+let curIndex = 0; // 当前处理到第几个账号（0 起），用于缓存文件隔离
+const statePath = (name) => path.join(CFG.CACHE_DIR, `acct${curIndex + 1}_${name}`);
+
+/** 读取账号列表：支持 BILI_USER_N / BILI_PASS_N / SESSDATA_N / BILI_JCT_N，N 从 1 递增 */
+function loadAccounts() {
+  const out = [];
+  for (let i = 1; i <= 9; i++) {
+    const user = process.env[`BILI_USER_${i}`] || (i === 1 ? process.env.BILI_USERNAME : '') || '';
+    const pass = process.env[`BILI_PASS_${i}`] || (i === 1 ? process.env.BILI_PASSWORD : '') || '';
+    const sess = process.env[`SESSDATA_${i}`] || (i === 1 ? process.env.SESSDATA : '') || '';
+    const jct = process.env[`BILI_JCT_${i}`] || (i === 1 ? process.env.BILI_JCT : '') || '';
+    if (!user && !sess) continue;
+    out.push({ user, pass, sess, jct });
+  }
+  return out;
+}
 
 function readJsonFile(p, def) {
   try {
@@ -630,34 +645,64 @@ async function taskWatchShare() {
 
 // ────────────────────────────── main ──────────────────────────────
 
+async function runAccount(idx, total) {
+  log(`
+########## 账号 ${idx + 1}/${total} ##########`);
+  try {
+    const { vip } = await bootstrap();
+    await taskVipPrivilege(vip);
+    await taskVipMisc(vip);
+    await taskMedalLight();
+    await taskSilver2Coin();
+    await taskWatchShare();
+    return { name: state.uname || `账号${idx + 1}`, ok: stat.ok, skip: stat.skip, fail: stat.fail, err: null };
+  } catch (e) {
+    warn(`  ❌ 账号 ${idx + 1} 中止: ${e.message}`);
+    return { name: state.uname || `账号${idx + 1}`, ok: stat.ok, skip: stat.skip, fail: stat.fail + 1, err: e.message };
+  }
+}
+
 async function main() {
   log('════════ B 站每日任务 ════════');
   if (CFG.DRY) log('⚠️  DRY_RUN 模式：不会发出任何写请求');
-  const t0 = Date.now();
 
-  const { vip } = await bootstrap();
-  await taskVipPrivilege(vip);
-  await taskVipMisc(vip);
-  await taskMedalLight();
-  await taskSilver2Coin();
-  await taskWatchShare();
+  const accounts = loadAccounts();
+  if (!accounts.length) {
+    throw new Error('没有可用账号：请配 SESSDATA_1/BILI_JCT_1 或 BILI_USER_1/BILI_PASS_1（多账号递增编号）');
+  }
+  log(`检测到 ${accounts.length} 个账号`);
+
+  const t0 = Date.now();
+  const results = [];
+  for (let i = 0; i < accounts.length; i++) {
+    curIndex = i;
+    Object.assign(CFG, {
+      SESSDATA: accounts[i].sess,
+      BILI_JCT: accounts[i].jct,
+      USERNAME: accounts[i].user,
+      PASSWORD: accounts[i].pass,
+    });
+    Object.assign(state, { mid: 0, uname: '', buvid3: '', mixin: '' });
+    Object.assign(stat, { ok: 0, skip: 0, fail: 0 });
+    results.push(await runAccount(i, accounts.length));
+  }
 
   const sec = ((Date.now() - t0) / 1000).toFixed(1);
-  log('════════ 完成 ════════');
-  log(`成功 ${stat.ok}｜跳过 ${stat.skip}｜失败 ${stat.fail}｜耗时 ${sec}s`);
+  const totalOk = results.reduce((a, r) => a + r.ok, 0);
+  const totalSkip = results.reduce((a, r) => a + r.skip, 0);
+  const totalFail = results.reduce((a, r) => a + r.fail, 0);
+
+  log('');
+  log('════════ 汇总 ════════');
+  results.forEach((r, i) => log(`账号${i + 1} ${r.name}：成功 ${r.ok}｜跳过 ${r.skip}｜失败 ${r.fail}${r.err ? '｜' + r.err : ''}`));
+  log(`合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`);
 
   const today = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  const lines = [
-    `账号：${state.uname}（${vip ? '大会员' : '非大会员'}）`,
-    `结果：成功 ${stat.ok}｜跳过 ${stat.skip}｜失败 ${stat.fail}`,
-    `耗时：${sec}s`,
-  ];
-  if (stat.fail > 0) lines.push('', `⚠️ 有 ${stat.fail} 项失败，详见运行日志`);
-  await push(`B站每日任务 · ${today}`, lines);
+  const lines = results.map((r, i) => `${i + 1}. ${r.name}：成功 ${r.ok}｜跳过 ${r.skip}｜失败 ${r.fail}${r.err ? `（${r.err}）` : ''}`);
+  lines.push(`合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`);
+  await push(`B站每日任务 · ${results.length} 个账号 · ${today}`, lines);
 
-  if (stat.fail > 0 && stat.ok === 0) {
-    process.exitCode = 1;
-  }
+  if (totalFail > 0 && totalOk === 0) process.exitCode = 1;
 }
 
 main().catch((e) => {

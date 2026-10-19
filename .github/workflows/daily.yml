@@ -50,11 +50,17 @@ jobs:
 
       - name: 运行每日任务
         env:
-          SESSDATA: ${{ secrets.SESSDATA }}
-          BILI_JCT: ${{ secrets.BILI_JCT }}
-          # 可选：不配则 cookie 过期时只报错，不会自动重登
-          BILI_USERNAME: ${{ secrets.BILI_USERNAME }}
-          BILI_PASSWORD: ${{ secrets.BILI_PASSWORD }}
+          # 账号 1（有 cookie 就填 SESSDATA_1/BILI_JCT_1，没有就靠账号密码登录）
+          SESSDATA_1: ${{ secrets.SESSDATA_1 }}
+          BILI_JCT_1: ${{ secrets.BILI_JCT_1 }}
+          BILI_USER_1: ${{ secrets.BILI_USER_1 }}
+          BILI_PASS_1: ${{ secrets.BILI_PASS_1 }}
+          # 账号 2
+          SESSDATA_2: ${{ secrets.SESSDATA_2 }}
+          BILI_JCT_2: ${{ secrets.BILI_JCT_2 }}
+          BILI_USER_2: ${{ secrets.BILI_USER_2 }}
+          BILI_PASS_2: ${{ secrets.BILI_PASS_2 }}
+          # 打码 / 推送
           TWO_CAPTCHA_API_KEY: ${{ secrets.TWO_CAPTCHA_API_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           MAX_LIGHT: ${{ inputs.max_light || '30' }}
