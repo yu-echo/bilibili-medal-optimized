@@ -21,6 +21,8 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const CFG = {
   SESSDATA: process.env.SESSDATA || '',
@@ -28,6 +30,14 @@ const CFG = {
   MAX_LIGHT: Number(process.env.MAX_LIGHT || 30),
   DELAY_MS: Number(process.env.DELAY_MS || 2000),
   DRY: process.env.DRY_RUN === '1',
+  // cookie 失效时的降级登录（可选，不配就只报错不重登）
+  USERNAME: process.env.BILI_USERNAME || '',
+  PASSWORD: process.env.BILI_PASSWORD || '',
+  CAPTCHA_KEY: process.env.TWO_CAPTCHA_API_KEY || '',
+  // 推送
+  PUSH_TOKEN: process.env.PUSHPLUS_TOKEN || '',
+  // cookie / 状态缓存目录（Actions 里用 actions/cache 持久化）
+  CACHE_DIR: process.env.COOKIE_CACHE || '.cookie-cache',
 };
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -85,17 +95,207 @@ function wbiQuery(params) {
   return `${q}&w_rid=${md5(q + state.mixin)}`;
 }
 
+// ────────────────────────────── 推送 & 状态缓存 ──────────────────────────────
+
+const sha256short = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
+const statePath = (name) => path.join(CFG.CACHE_DIR, name);
+
+function readJsonFile(p, def) {
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return def;
+  }
+}
+function writeJsonFile(p, obj) {
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    warn('  ⚠️  写缓存失败:', e.message);
+  }
+}
+
+/**
+ * 推送尾部（严格按用户长期规范）
+ * 22 条短横线 + 来源 + 运行记录 + Token 认证日期 + 有效期
+ * SESSDATA 是不透明凭据：解析不出发放/过期时间 → 按规范不伪造，只记首次认证日期
+ */
+function buildFooter() {
+  const st = readJsonFile(statePath('auth.json'), {});
+  const fromCI = !!process.env.GITHUB_ACTIONS;
+  const lines = ['----------------------'];
+  lines.push(`来源：${fromCI ? 'GitHub Actions' : '本地运行'}${process.env.GITHUB_WORKFLOW ? ' · ' + process.env.GITHUB_WORKFLOW : ''}`);
+  if (process.env.GITHUB_RUN_ID) {
+    lines.push(`运行记录：${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`);
+  }
+  lines.push(`Token 认证日期：${st.firstAuthDate || '未知'}`);
+  lines.push('凭证有效期至 未知（SESSDATA 为不透明凭据，无法解析）');
+  return lines.join('\n');
+}
+
+async function push(title, bodyLines) {
+  const text = `${bodyLines.join('\n')}\n\n${buildFooter()}`;
+  log('───── 推送正文 ─────');
+  log(text);
+  log('────────────────────');
+  if (!CFG.PUSH_TOKEN) {
+    log('（未配置 PUSHPLUS_TOKEN，跳过推送）');
+    return;
+  }
+  if (CFG.DRY) {
+    log('（DRY_RUN，不实际推送）');
+    return;
+  }
+  try {
+    const res = await fetch('https://www.pushplus.plus/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: CFG.PUSH_TOKEN, title, content: text, template: 'txt' }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const j = await res.json();
+    if (j.code === 200) log('✅ 推送已发送');
+    else warn(`  ⚠️  推送失败 code=${j.code} ${j.msg}`);
+  } catch (e) {
+    warn('  ⚠️  推送异常:', e.message);
+  }
+}
+
+// ────────────────────────────── 密码登录（cookie 失效时降级） ──────────────────────────────
+
+const PASSPORT = 'https://passport.bilibili.com';
+
+/**
+ * 2captcha 解极验 v3
+ * B 站拿到的是 gt + challenge，和极验 v3 一致，method=geetest
+ * 平均解算 30~60 秒
+ */
+async function solveGeetest(gt, challenge, pageurl) {
+  if (!CFG.CAPTCHA_KEY) throw new Error('未配置 TWO_CAPTCHA_API_KEY，无法自动通过极验');
+  const submitUrl = 'https://2captcha.com/in.php?' + new URLSearchParams({
+    key: CFG.CAPTCHA_KEY, method: 'geetest', gt, challenge, pageurl, json: '1',
+  }).toString();
+  const sub = await (await fetch(submitUrl, { signal: AbortSignal.timeout(20000) })).json();
+  if (sub.status !== 1) throw new Error(`2captcha 提交失败: ${sub.request}`);
+
+  for (let i = 0; i < 40; i++) {
+    await sleep(5000);
+    const pollUrl = `https://2captcha.com/res.php?key=${CFG.CAPTCHA_KEY}&action=get&id=${sub.request}&json=1`;
+    const r = await (await fetch(pollUrl, { signal: AbortSignal.timeout(20000) })).json();
+    if (r.status === 1) return r.request;
+    if (r.request !== 'CAPCHA_NOT_READY') throw new Error(`2captcha 解算失败: ${r.request}`);
+  }
+  throw new Error('2captcha 解算超时（>200s）');
+}
+
+/** 账号密码 + 2captcha 打码登录，成功后把新 cookie 写进缓存 */
+async function loginByPassword() {
+  if (!CFG.USERNAME || !CFG.PASSWORD) throw new Error('未配置 BILI_USERNAME / BILI_PASSWORD');
+  log('  🔑 cookie 失效，尝试账号密码登录 …');
+
+  const capRes = await (await fetch(`${PASSPORT}/x/passport-login/captcha?source=main_web&t=${Date.now()}`)).json();
+  if (capRes.code !== 0) throw new Error(`取验证码配置失败 code=${capRes.code}`);
+  const { token, geetest } = capRes.data;
+  log(`  极验 ${capRes.data.type}，提交打码（约 30~60 秒）…`);
+
+  const solved = await solveGeetest(geetest.gt, geetest.challenge, `${PASSPORT}/login`);
+  log('  ✅ 打码完成，提交登录 …');
+
+  const keyRes = await (await fetch(`${PASSPORT}/x/passport-login/web/key?_=${Date.now()}`)).json();
+  const { hash, key: pubKey } = keyRes.data;
+  const encPwd = crypto
+    .publicEncrypt({ key: pubKey, padding: crypto.constants.RSA_PKCS1_PADDING }, Buffer.from(hash + CFG.PASSWORD))
+    .toString('base64');
+
+  const body = new URLSearchParams({
+    username: CFG.USERNAME,
+    password: encPwd,
+    keep_sec: 'true',
+    token,
+    challenge: solved.geetest_challenge || geetest.challenge,
+    validate: solved.geetest_validate,
+    seccode: solved.geetest_seccode,
+    go_url: 'https://www.bilibili.com/',
+    source: 'main_web',
+  });
+
+  const res = await fetch(`${PASSPORT}/x/passport-login/web/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': UA, referer: `${PASSPORT}/login` },
+    body: body.toString(),
+    redirect: 'manual',
+  });
+
+  const rawCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  let newSess = '', newJct = '';
+  for (const c of rawCookies) {
+    const m1 = c.match(/^SESSDATA=([^;]+)/);
+    const m2 = c.match(/^bili_jct=([^;]+)/);
+    if (m1) newSess = m1[1];
+    if (m2) newJct = m2[1];
+  }
+  const j = await res.json().catch(() => ({}));
+  if (!newSess) throw new Error(`登录失败 code=${j.code ?? '?'} ${j.message || ''}`);
+
+  CFG.SESSDATA = newSess;
+  if (newJct) CFG.BILI_JCT = newJct;
+  writeJsonFile(statePath('cookie.json'), { SESSDATA: CFG.SESSDATA, BILI_JCT: CFG.BILI_JCT });
+  log('  ✅ 密码登录成功，新 cookie 已写入缓存');
+}
+
 // ────────────────────────────── 登录 & 准备 ──────────────────────────────
 
+async function checkLogin() {
+  try {
+    const nav = await http('https://api.bilibili.com/x/web-interface/nav', {
+      referer: 'https://www.bilibili.com/',
+      retry: 0,
+    });
+    if (nav.code === 0 && nav.data && nav.data.isLogin) return nav;
+    log(`  \u26a0\ufe0f  \u767b\u5f55\u6821\u9a8c\u5931\u8d25 code=${nav.code} ${nav.message}`);
+  } catch (e) {
+    warn('  \u26a0\ufe0f  \u767b\u5f55\u6821\u9a8c\u5f02\u5e38:', e.message);
+  }
+  return null;
+}
+
 async function bootstrap() {
-  if (!CFG.SESSDATA || !CFG.BILI_JCT) {
-    throw new Error('缺少 SESSDATA 或 BILI_JCT 环境变量');
+  log('[1/6] \u767b\u5f55\u68c0\u67e5 \u2026');
+
+  // \u7f13\u5b58\u91cc\u7684 cookie \u4f18\u5148\uff1a\u5bc6\u7801\u767b\u5f55\u62ff\u5230\u7684\u65b0 cookie \u6bd4 Secret \u91cc\u7684\u65b0
+  const cached = readJsonFile(statePath('cookie.json'), null);
+  if (cached && cached.SESSDATA) {
+    CFG.SESSDATA = cached.SESSDATA;
+    if (cached.BILI_JCT) CFG.BILI_JCT = cached.BILI_JCT;
+    log('  \u4f7f\u7528\u7f13\u5b58\u4e2d\u7684 cookie');
   }
-  log('[1/6] 登录检查 …');
-  const nav = await http('https://api.bilibili.com/x/web-interface/nav', { referer: 'https://www.bilibili.com/' });
-  if (nav.code !== 0 || !nav.data || !nav.data.isLogin) {
-    throw new Error(`登录失效（code=${nav.code} ${nav.message}），请更新 SESSDATA / BILI_JCT`);
+  if ((!CFG.SESSDATA || !CFG.BILI_JCT) && !(CFG.USERNAME && CFG.PASSWORD)) {
+    throw new Error('\u7f3a\u5c11 SESSDATA / BILI_JCT\uff0c\u4e14\u672a\u914d\u7f6e BILI_USERNAME / BILI_PASSWORD');
   }
+
+  let nav = await checkLogin();
+  if (!nav) {
+    // cookie \u5931\u6548 \u2192 \u8d26\u53f7\u5bc6\u7801 + 2captcha \u6253\u7801\u91cd\u767b
+    try {
+      await loginByPassword();
+      nav = await checkLogin();
+    } catch (e) {
+      throw new Error(`cookie \u5df2\u5931\u6548\uff0c\u5bc6\u7801\u767b\u5f55\u4e5f\u5931\u8d25\uff1a${e.message}`);
+    }
+    if (!nav) throw new Error('\u5bc6\u7801\u767b\u5f55\u540e\u4ecd\u672a\u901a\u8fc7\u6821\u9a8c\uff08\u53ef\u80fd\u89e6\u53d1\u4e86\u98ce\u63a7\uff09');
+  }
+
+  // \u8bb0\u5f55\u9996\u6b21\u8ba4\u8bc1\u65e5\u671f\uff08SESSDATA \u6362\u4e86\u5c31\u91cd\u7f6e\uff09
+  const fp = sha256short(CFG.SESSDATA);
+  const authState = readJsonFile(statePath('auth.json'), {});
+  if (authState.fingerprint !== fp) {
+    authState.fingerprint = fp;
+    authState.firstAuthDate = new Date().toISOString().slice(0, 10);
+    writeJsonFile(statePath('auth.json'), authState);
+    log(`  \U0001f4dd \u65b0\u51ed\u636e\uff0c\u8ba4\u8bc1\u65e5\u671f\u8bb0\u4e3a ${authState.firstAuthDate}`);
+  }
+
   state.mid = nav.data.mid;
   state.uname = nav.data.uname;
   const imgKey = nav.data.wbi_img.img_url.split('/').pop().split('.')[0];
@@ -103,17 +303,17 @@ async function bootstrap() {
   const raw = imgKey + subKey;
   state.mixin = MIXIN_V.map((i) => raw.charAt(i)).filter(Boolean).join('').slice(0, 32);
 
-  // 无头环境没有 LIVE_BUVID，用 SPI 接口现取一个（与 asoul-support 同做法）
+  // \u65e0\u5934\u73af\u5883\u6ca1\u6709 LIVE_BUVID\uff0c\u7528 SPI \u63a5\u53e3\u73b0\u53d6\u4e00\u4e2a
   try {
     const spi = await http('https://api.bilibili.com/x/frontend/finger/spi', { referer: 'https://www.bilibili.com/' });
     if (spi.code === 0 && spi.data && spi.data.b_3) state.buvid3 = spi.data.b_3;
   } catch (e) {
-    warn('  ⚠️  取 buvid3 失败，继续（部分接口可能受限）:', e.message);
+    warn('  \u26a0\ufe0f  \u53d6 buvid3 \u5931\u8d25\uff0c\u7ee7\u7eed\uff08\u90e8\u5206\u63a5\u53e3\u53ef\u80fd\u53d7\u9650\uff09:', e.message);
   }
 
   const vip = nav.data.vipStatus === 1;
-  log(`  ✅ ${state.uname} (mid=${state.mid})｜${vip ? nav.data.vip_label.text : '非大会员'}｜buvid3 ${state.buvid3 ? '已获取' : '缺失'}`);
-  log(`  ✅ wbi mixin key ${state.mixin.length === 32 ? '已生成' : '异常'}`);
+  log(`  \u2705 ${state.uname} (mid=${state.mid})\uff5c${vip ? nav.data.vip_label.text : '\u975e\u5927\u4f1a\u5458'}\uff5cbuvid3 ${state.buvid3 ? '\u5df2\u83b7\u53d6' : '\u7f3a\u5931'}`);
+  log(`  \u2705 wbi mixin key ${state.mixin.length === 32 ? '\u5df2\u751f\u6210' : '\u5f02\u5e38'}`);
   return { vip };
 }
 
@@ -445,6 +645,15 @@ async function main() {
   const sec = ((Date.now() - t0) / 1000).toFixed(1);
   log('════════ 完成 ════════');
   log(`成功 ${stat.ok}｜跳过 ${stat.skip}｜失败 ${stat.fail}｜耗时 ${sec}s`);
+
+  const today = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' });
+  const lines = [
+    `账号：${state.uname}（${vip ? '大会员' : '非大会员'}）`,
+    `结果：成功 ${stat.ok}｜跳过 ${stat.skip}｜失败 ${stat.fail}`,
+    `耗时：${sec}s`,
+  ];
+  if (stat.fail > 0) lines.push('', `⚠️ 有 ${stat.fail} 项失败，详见运行日志`);
+  await push(`B站每日任务 · ${today}`, lines);
 
   if (stat.fail > 0 && stat.ok === 0) {
     process.exitCode = 1;

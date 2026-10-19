@@ -18,7 +18,7 @@ on:
         default: '30'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: bili-daily
@@ -38,11 +38,38 @@ jobs:
         with:
           node-version: '20'
 
+      # cookie 和认证日期缓存在这里：密码登录拿到的新 cookie 会写回，下次直接复用，
+      # 避免每天都走一遍打码（2captcha 约 1 分钱/次）
+      - name: 恢复 cookie 缓存
+        uses: actions/cache@v4
+        with:
+          path: .cookie-cache
+          key: bili-cache-${{ github.run_id }}
+          restore-keys: |
+            bili-cache-
+
       - name: 运行每日任务
         env:
           SESSDATA: ${{ secrets.SESSDATA }}
           BILI_JCT: ${{ secrets.BILI_JCT }}
+          # 可选：不配则 cookie 过期时只报错，不会自动重登
+          BILI_USERNAME: ${{ secrets.BILI_USERNAME }}
+          BILI_PASSWORD: ${{ secrets.BILI_PASSWORD }}
+          TWO_CAPTCHA_API_KEY: ${{ secrets.TWO_CAPTCHA_API_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           MAX_LIGHT: ${{ inputs.max_light || '30' }}
           DELAY_MS: '2000'
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node scripts/daily.mjs
+
+      # GitHub 会在仓库连续 60 天无提交时自动停用 scheduled workflow。
+      # 每月 1 号打一个空提交保活，避免悄悄停掉。
+      - name: 保活（每月 1 号）
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date -u +%d)" = "01" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore: keepalive [skip ci]"
+            git push || true
+          fi

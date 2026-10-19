@@ -1,0 +1,7 @@
+# cookie / 认证状态缓存（含 SESSDATA，绝不能提交）
+.cookie-cache/
+.cookies.json
+
+node_modules/
+*.log
+.DS_Store

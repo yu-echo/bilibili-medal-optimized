@@ -82,17 +82,57 @@
 
 结论：这些项目看起来任务多，但**大部分要么已经失效、要么对当前账号不适用、要么风险高于收益**。真正对你有效的增量只有银瓜子兑换这一条。
 
-### 配置（3 步）
+### 配置
 
-1. 打开 `https://github.com/yu-echo/bilibili-medal-optimized/settings/secrets/actions`
-2. 添加两个 Repository secrets：
+打开 `https://github.com/yu-echo/bilibili-medal-optimized/settings/secrets/actions`，添加：
 
-| Name | Value |
-|---|---|
-| `SESSDATA` | 浏览器 F12 → Application → Cookies → `https://www.bilibili.com` → 找 `SESSDATA` 那一行的值 |
-| `BILI_JCT` | 同上一栏里的 `bili_jct` |
+| Name | 必填 | 值 |
+|---|---|---|
+| `SESSDATA` | ✅ | F12 → Application → Cookies → `https://www.bilibili.com` → 找 `SESSDATA` |
+| `BILI_JCT` | ✅ | 同一栏里的 `bili_jct` |
+| `PUSHPLUS_TOKEN` | 推荐 | [pushplus.plus](https://www.pushplus.plus/) 微信扫码拿 token，推送用 |
+| `BILI_USERNAME` | 可选 | 手机号/账号，cookie 过期时自动重登用 |
+| `BILI_PASSWORD` | 可选 | 账号密码（配合打码） |
+| `TWO_CAPTCHA_API_KEY` | 可选 | [2captcha.com](https://2captcha.com/) 的 key，约 1 分钱/次 |
 
-3. 打开 Actions → 「B站每日任务」→ Run workflow（可勾 `dry_run` 先空跑一次）
+然后 Actions → 「B站每日任务」→ Run workflow，先勾 `dry_run` 空跑一次确认登录通过。
+
+### cookie 过期怎么办
+
+支持**自动降级重登**，不需要你手动换 cookie：
+
+```
+cookie 失效 → GET /x/passport-login/captcha 拿 gt+challenge（极验 v3）
+           → 2captcha 解算（约 30~60 秒）
+           → GET /x/passport-login/web/key 拿 RSA 公钥 + hash
+           → 密码加密 = RSA(hash + password)，POST 登录
+           → 从 Set-Cookie 抓新的 SESSDATA / bili_jct，写进 .cookie-cache
+```
+
+新 cookie 用 `actions/cache` 跨运行保存，**下次直接复用，不会每次都打码**。只有真的失效了才花那 1 分钱。
+
+⚠️ 三个前提：
+1. 必须配 `BILI_USERNAME` / `BILI_PASSWORD` / `TWO_CAPTCHA_API_KEY`，少一个就走不了这条路
+2. 打码会增加登录 30~60 秒耗时
+3. **这部分没有实测过** —— B 站登录接口已验证可用（见下），但完整登录流程会消耗真实验证码并改变登录态，我没在你的账号上跑过
+
+### 推送格式
+
+PushPlus 推送，正文末尾按固定规范标注来源：
+
+```
+账号：xxx（大会员）
+结果：成功 5｜跳过 12｜失败 0
+耗时：93.2s
+
+----------------------
+来源：GitHub Actions · B站每日任务
+运行记录：https://github.com/yu-echo/bilibili-medal-optimized/actions/runs/<id>
+Token 认证日期：2026-10-19
+凭证有效期至 未知（SESSDATA 为不透明凭据，无法解析）
+```
+
+有效期写「未知」是故意的：SESSDATA 是不透明凭据，解析不出发放/过期时间，按规范**不伪造**。认证日期取首次认证成功日，cookie 换了会自动重置。
 
 ### 定时
 
