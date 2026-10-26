@@ -659,9 +659,11 @@ function renderDetail(lines, max = 40) {
     lit = [];
   };
   for (const raw of lines) {
-    const s = String(raw).trim();
-    if (!s) continue;
-    if (/buvid3 (已获取|缺失)|wbi mixin key/.test(s)) continue;
+    const s0 = String(raw).trim();
+    if (!s0) continue;
+    if (/wbi mixin key/.test(s0)) continue;
+    // buvid3 是过程细节，但同一行前半段（账号名 / 大会员身份）有用，只砍尾巴
+    const s = s0.replace(/｜buvid3 (已获取|缺失)/, '');
     const m = s.match(/^✅\s*点亮\s+(.+)$/);
     if (m) {
       lit.push(m[1]);
