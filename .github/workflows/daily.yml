@@ -3,8 +3,8 @@ name: B站每日任务
 on:
   schedule:
     # UTC 16:05 = 北京时间 00:05。亲密度每天 0 点重置，卡在重置后立刻跑，
-    # 挂机那一轮才能拿到「当天」的 15 分钟额度。Actions 的 cron 不保证准时，
-    # 忙的时候可能延后十几分钟，不影响结果。
+    # 点亮才算进「当天」。Actions 的 cron 不保证准时，忙的时候可能延后十几分钟，
+    # 这些任务对时间不敏感，不影响结果。
     - cron: '5 16 * * *'
   workflow_dispatch:
     inputs:
@@ -16,10 +16,6 @@ on:
         description: '本次最多点亮多少枚牌子（200 = 不限）'
         type: string
         default: '200'
-      watch_top:
-        description: '每个账号最多挂几个直播间的观看任务（0 = 不挂）'
-        type: string
-        default: '4'
 
 permissions:
   contents: write
@@ -31,7 +27,9 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 直播挂机下线后整套只要 2~3 分钟（点亮 200 枚 × 2 秒间隔），
+    # 15 分钟是给「牌子特别多 / 网络抽风 / 接口重试」留的余量，不是常规耗时。
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -68,22 +66,10 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node scripts/daily.mjs
 
-      # 直播亲密度：对齐上游 BiliBiliToolPro 的 LiveFansMedal 任务
-      # 只挂「开播中 + 已点亮 + 当天观看任务未满」的房间，高等级优先，多枚并行。
-      # 2026-04 改版：观看满 15 分钟 +1 亲密度、每日上限 10 次，故每枚至少挂 15 分钟。
-      # 挂机失败不影响前面的点亮结果（这一步单独失败也只是 job 标红）。
-      - name: 直播观看亲密度（上游方案）
-        if: ${{ (inputs.watch_top || '4') != '0' }}
-        continue-on-error: true
-        env:
-          SESSDATA_1: ${{ secrets.SESSDATA_1 }}
-          BILI_JCT_1: ${{ secrets.BILI_JCT_1 }}
-          SESSDATA_2: ${{ secrets.SESSDATA_2 }}
-          BILI_JCT_2: ${{ secrets.BILI_JCT_2 }}
-          WATCH_TOP: ${{ inputs.watch_top || '4' }}
-          WATCH_HEARTBEATS: '16'
-          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
-        run: node scripts/watch.mjs
+      # 直播挂机（观看亲密度）2026-10-26 整块下线：每枚牌子至少挂 15 分钟、
+      # 4 枚并行也要 60 分钟，是这套 pipeline 里唯一的长任务，也是风控最敏感的部分。
+      # 而且实测它给不了确定的收益（纯接口心跳上报 10 次只记 1 分钟时长）。
+      # 详见 README「2026-10-26：直播挂机整块下线」。
 
       # GitHub 会在仓库连续 60 天无提交时自动停用 scheduled workflow。
       # 每月 1 号打一个空提交保活，避免悄悄停掉。
