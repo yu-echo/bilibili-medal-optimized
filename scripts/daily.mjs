@@ -503,6 +503,7 @@ async function taskMedalLight() {
   if (offAir) log(`  其中 ${offAir} 枚主播未开播，点亮无效，跳过（等开播后自动补）`);
 
   if (!unlit.length) {
+    stat.skip++;
     log('  ⏭️  没有可点亮的（未点亮的都不在播）');
     return;
   }

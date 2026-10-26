@@ -95,7 +95,8 @@ export function digestOf(detail) {
 
     // 登录检查那行是账号身份，抽出来当小标题，不混进条目
     if (kind === 'ok' && /登录/.test(section || '')) {
-      const id = body.match(IDENTITY_RE);
+      // 尾巴的 `｜buvid3 已获取` 是过程细节，别带进小标题
+      const id = body.replace(/\s*｜\s*buvid3\s*(?:已获取|缺失)/, '').match(IDENTITY_RE);
       if (id) {
         identity = { name: id[1].trim(), mid: id[2], tier: (id[3] || '').trim() };
         continue;

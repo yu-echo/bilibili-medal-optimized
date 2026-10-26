@@ -9,7 +9,7 @@ import { digestOf, renderDigest, accountHead } from './lib/pushfmt.mjs';
 /* ── 样本：账号 1（年度大会员，9 项失败）── */
 const A1 = [
   '[1/6] 登录检查 …',
-  '  ✅ 神の麒零 (mid=7322072)｜年度大会员',
+  '  ✅ 神の麒零 (mid=7322072)｜年度大会员｜buvid3 已获取',
   '[2/6] 大会员权益 …',
   '  ⏭️  漫画福利已领或未达条件',
   '  ⏭️  type=14 已领过',
@@ -38,7 +38,7 @@ const A1 = [
 /* ── 样本：账号 2（非大会员，1 项失败）── */
 const A2 = [
   '[1/6] 登录检查 …',
-  '  ✅ 煜晓晓晓 (mid=130262187)｜非大会员',
+  '  ✅ 煜晓晓晓 (mid=130262187)｜非大会员｜buvid3 已获取',
   '[2/6] 大会员权益 …',
   '  ⏭️  非大会员，跳过',
   '[3/6] 大会员经验 / 积分签到 …',
@@ -63,6 +63,7 @@ assert.equal(d1.identity.name, '神の麒零');
 assert.equal(d1.identity.tier, '年度大会员');
 assert.equal(d2.identity.name, '煜晓晓晓');
 assert.equal(d2.identity.tier, '非大会员');
+assert.ok(!/buvid3/.test(accountHead(0, { name: 'x', ok: 0, skip: 0, fail: 0 }, d1)), '小标题不该带 buvid3');
 
 assert.equal(
   accountHead(0, { name: 'x', ok: 2, skip: 3, fail: 9 }, d1),
