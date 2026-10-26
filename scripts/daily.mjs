@@ -23,6 +23,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { digestOf, renderDigest, accountHead } from './lib/pushfmt.mjs';
 
 const CFG = {
   SESSDATA: process.env.SESSDATA || '',
@@ -327,6 +328,7 @@ async function bootstrap() {
 async function taskVipPrivilege(isVip) {
   log('[2/6] 大会员权益 …');
   if (!isVip) {
+    stat.skip++;
     log('  ⏭️  非大会员，跳过');
     return;
   }
@@ -421,6 +423,7 @@ async function taskVipPrivilege(isVip) {
 async function taskVipMisc(isVip) {
   log('[3/6] 大会员经验 / 积分签到 …');
   if (!isVip) {
+    stat.skip++;
     log('  ⏭️  非大会员，跳过');
     return;
   }
@@ -642,41 +645,6 @@ async function taskWatchShare() {
 
 // ────────────────────────────── main ──────────────────────────────
 
-/**
- * 把一天的明细压成微信里能看的几行。
- *
- * - 去掉 bootstrap 的两行（用户名 / wbi key），那是过程不是结果
- * - 连续的「✅ 点亮 xxx」合并成一行，否则几十枚牌子会把推送刷成流水账
- * - 超过 max 行截断，并说清还剩几行（去运行记录里看）
- */
-function renderDetail(lines, max = 40) {
-  const out = [];
-  let lit = [];
-  const flushLit = () => {
-    if (!lit.length) return;
-    const names = lit.slice(0, 6).join('、') + (lit.length > 6 ? ` 等 ${lit.length} 枚` : '');
-    out.push(`  ✅ 点亮 ${lit.length} 枚：${names}`);
-    lit = [];
-  };
-  for (const raw of lines) {
-    const s0 = String(raw).trim();
-    if (!s0) continue;
-    if (/wbi mixin key/.test(s0)) continue;
-    // buvid3 是过程细节，但同一行前半段（账号名 / 大会员身份）有用，只砍尾巴
-    const s = s0.replace(/｜buvid3 (已获取|缺失)/, '');
-    const m = s.match(/^✅\s*点亮\s+(.+)$/);
-    if (m) {
-      lit.push(m[1]);
-      continue;
-    }
-    flushLit();
-    out.push(s);
-  }
-  flushLit();
-  if (out.length <= max) return out;
-  return [...out.slice(0, max), `  …（还有 ${out.length - max} 行，见运行记录）`];
-}
-
 async function runAccount(idx, total) {
   log(`
 ########## 账号 ${idx + 1}/${total} ##########`);
@@ -732,20 +700,36 @@ async function main() {
 
   const today = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
-  /* 推送正文：每个账号先一行汇总，再跟它的明细。
-     摘要给「要不要管」的判断，明细给「具体哪项挂了」，两者都要。 */
+  /* 推送正文：每个账号「一行汇总 + 按环节分组的几行结论」。
+     不再回显日志原文 —— 一个账号 25 行、整条近 1200 字，微信里既扫不动也容易看不全。
+     分组规则见 scripts/lib/pushfmt.mjs（失败在前，同环节合并，去掉 type= 编号）。 */
   const lines = [];
   results.forEach((r, i) => {
-    const detail = renderDetail(r.detail || []);
-    // 明细里已经有那条错误了，摘要就别再重复一遍括号
-    const errTail = r.err && !detail.length ? `（${r.err}）` : '';
-    lines.push(`${i + 1}. ${r.name}：成功 ${r.ok}｜跳过 ${r.skip}｜失败 ${r.fail}${errTail}`);
-    if (detail.length) lines.push(...detail);
+    const d = digestOf(r.detail || []);
+    const body = renderDigest(d);
+    const errTail = r.err && !body.length ? `（${r.err}）` : '';
+    lines.push(accountHead(i, r, d) + errTail);
+    if (body.length) lines.push(...body);
     else lines.push('  （没有可展示的明细）');
     lines.push('');
   });
   lines.push(`合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`);
   await push(`B站每日任务 · ${results.length} 个账号 · ${today}`, lines);
+
+  /* Actions 运行页也留一份完整日志，推送里放不下的细节去这里看 */
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const md = ['## B站每日任务', '', '```', `合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`];
+    results.forEach((r, i) => {
+      md.push('', `### ${i + 1}. ${r.name}`, '```');
+      md.push(...(r.detail || []).map((x) => String(x)));
+      md.push('```');
+    });
+    try {
+      fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+    } catch {
+      /* 写不进去不影响主流程 */
+    }
+  }
 
   if (totalFail > 0 && totalOk === 0) process.exitCode = 1;
 }
