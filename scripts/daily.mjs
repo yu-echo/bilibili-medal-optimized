@@ -42,12 +42,23 @@ const MIXIN_V = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27
   22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52];
 
 const state = { mid: 0, uname: '', buvid3: '', mixin: '' };
-const stat = { ok: 0, skip: 0, fail: 0 };
+const stat = { ok: 0, skip: 0, fail: 0, detail: [] };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const md5 = (s) => crypto.createHash('md5').update(s).digest('hex');
-const log = (...a) => console.log(...a);
-const warn = (...a) => console.warn(...a);
+
+/* 日志同时收集成「明细」：推送正文要能说清哪一项成功、哪一项失败，
+   只报「成功5｜跳过4｜失败9」等于什么都没说（2026-10-26 用户反馈）。
+   捕获开关由 runAccount 控制 —— 汇总和推送那几行不该混进明细里。 */
+let capturing = false;
+const log = (...a) => {
+  console.log(...a);
+  if (capturing) stat.detail.push(a.join(' '));
+};
+const warn = (...a) => {
+  console.warn(...a);
+  if (capturing) stat.detail.push(a.join(' '));
+};
 
 function cookieHeader() {
   const p = [`SESSDATA=${CFG.SESSDATA}`, `bili_jct=${CFG.BILI_JCT}`];
@@ -631,9 +642,43 @@ async function taskWatchShare() {
 
 // ────────────────────────────── main ──────────────────────────────
 
+/**
+ * 把一天的明细压成微信里能看的几行。
+ *
+ * - 去掉 bootstrap 的两行（用户名 / wbi key），那是过程不是结果
+ * - 连续的「✅ 点亮 xxx」合并成一行，否则几十枚牌子会把推送刷成流水账
+ * - 超过 max 行截断，并说清还剩几行（去运行记录里看）
+ */
+function renderDetail(lines, max = 40) {
+  const out = [];
+  let lit = [];
+  const flushLit = () => {
+    if (!lit.length) return;
+    const names = lit.slice(0, 6).join('、') + (lit.length > 6 ? ` 等 ${lit.length} 枚` : '');
+    out.push(`  ✅ 点亮 ${lit.length} 枚：${names}`);
+    lit = [];
+  };
+  for (const raw of lines) {
+    const s = String(raw).trim();
+    if (!s) continue;
+    if (/buvid3 (已获取|缺失)|wbi mixin key/.test(s)) continue;
+    const m = s.match(/^✅\s*点亮\s+(.+)$/);
+    if (m) {
+      lit.push(m[1]);
+      continue;
+    }
+    flushLit();
+    out.push(s);
+  }
+  flushLit();
+  if (out.length <= max) return out;
+  return [...out.slice(0, max), `  …（还有 ${out.length - max} 行，见运行记录）`];
+}
+
 async function runAccount(idx, total) {
   log(`
 ########## 账号 ${idx + 1}/${total} ##########`);
+  capturing = true;
   try {
     const { vip } = await bootstrap();
     await taskVipPrivilege(vip);
@@ -641,10 +686,12 @@ async function runAccount(idx, total) {
     await taskMedalLight();
     await taskSilver2Coin();
     await taskWatchShare();
-    return { name: state.uname || `账号${idx + 1}`, ok: stat.ok, skip: stat.skip, fail: stat.fail, err: null };
+    return { name: state.uname || `账号${idx + 1}`, ok: stat.ok, skip: stat.skip, fail: stat.fail, err: null, detail: stat.detail.slice() };
   } catch (e) {
     warn(`  ❌ 账号 ${idx + 1} 中止: ${e.message}`);
-    return { name: state.uname || `账号${idx + 1}`, ok: stat.ok, skip: stat.skip, fail: stat.fail + 1, err: e.message };
+    return { name: state.uname || `账号${idx + 1}`, ok: stat.ok, skip: stat.skip, fail: stat.fail + 1, err: e.message, detail: stat.detail.slice() };
+  } finally {
+    capturing = false;
   }
 }
 
@@ -667,7 +714,7 @@ async function main() {
       BILI_JCT: accounts[i].jct,
     });
     Object.assign(state, { mid: 0, uname: '', buvid3: '', mixin: '' });
-    Object.assign(stat, { ok: 0, skip: 0, fail: 0 });
+    Object.assign(stat, { ok: 0, skip: 0, fail: 0, detail: [] });
     results.push(await runAccount(i, accounts.length));
   }
 
@@ -682,7 +729,19 @@ async function main() {
   log(`合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`);
 
   const today = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  const lines = results.map((r, i) => `${i + 1}. ${r.name}：成功 ${r.ok}｜跳过 ${r.skip}｜失败 ${r.fail}${r.err ? `（${r.err}）` : ''}`);
+
+  /* 推送正文：每个账号先一行汇总，再跟它的明细。
+     摘要给「要不要管」的判断，明细给「具体哪项挂了」，两者都要。 */
+  const lines = [];
+  results.forEach((r, i) => {
+    const detail = renderDetail(r.detail || []);
+    // 明细里已经有那条错误了，摘要就别再重复一遍括号
+    const errTail = r.err && !detail.length ? `（${r.err}）` : '';
+    lines.push(`${i + 1}. ${r.name}：成功 ${r.ok}｜跳过 ${r.skip}｜失败 ${r.fail}${errTail}`);
+    if (detail.length) lines.push(...detail);
+    else lines.push('  （没有可展示的明细）');
+    lines.push('');
+  });
   lines.push(`合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`);
   await push(`B站每日任务 · ${results.length} 个账号 · ${today}`, lines);
 
