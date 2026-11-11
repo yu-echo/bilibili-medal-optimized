@@ -5,7 +5,12 @@ on:
     # UTC 16:05 = 北京时间 00:05。亲密度每天 0 点重置，卡在重置后立刻跑，
     # 点亮才算进「当天」。Actions 的 cron 不保证准时，忙的时候可能延后十几分钟，
     # 这些任务对时间不敏感，不影响结果。
+    #
+    # 2026-11-11 加第二槽（北京 12:05）：实测本 workflow 派发延迟中位 4.5 小时、
+    # P90 5.8 小时。亲密度是「当天点亮的牌子数」，跑两趟不会多点，只是第一趟挂了
+    # 还有一次机会。当天已有成功运行则 gate job 跳过；公开仓库不烧配额。
     - cron: '5 16 * * *'
+    - cron: '5 4 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -19,13 +24,47 @@ on:
 
 permissions:
   contents: write
+  # gate job 要读本 workflow 当天的运行记录
+  actions: read
 
 concurrency:
   group: bili-daily
   cancel-in-progress: false
 
 jobs:
+  # 补跑槽的守卫：今天已有成功运行就跳过。独立成 job 是为了不动下面任何一步。
+  # 查询失败一律按「今天没跑过」处理：宁可多跑一趟，不能漏签。
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.q.outputs.skip }}
+    steps:
+      - name: 查当天是否已有成功运行
+        id: q
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          now=$(date -u +%s)
+          # 北京当天 00:00 对应的 UTC 时刻（纯算术，不吃时区数据库）
+          day_start=$(( (now + 28800) / 86400 * 86400 - 28800 ))
+          since=$(date -u -d "@$day_start" +%Y-%m-%dT%H:%M:%SZ)
+          wf="${GITHUB_WORKFLOW_REF%@*}"
+          wf="${wf##*/.github/workflows/}"
+          n=$(curl -sS --max-time 15 \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/runs?per_page=50&created=%3E%3D${since}&status=success" \
+              | jq --arg me "${GITHUB_RUN_ID}" '[.workflow_runs[]? | select((.id|tostring) != $me)] | length' 2>/dev/null) || n=""
+          case "${n:-}" in ''|*[!0-9]*) echo "查询失败，按「今天没跑过」处理"; n=0 ;; esac
+          echo "北京当天起点 ${since}；今天已成功 ${n} 次"
+          if [ "$n" -gt 0 ]; then echo "skip=1" >> "$GITHUB_OUTPUT"; else echo "skip=0" >> "$GITHUB_OUTPUT"; fi
+
   daily:
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.skip != '1' }}
     runs-on: ubuntu-latest
     # 常规 ~1 分钟（2 个账号 × 点亮 40 枚 × 2 秒间隔）。
     # 15 分钟是给「牌子特别多 / 网络抽风 / 接口重试」留的余量。
