@@ -15,7 +15,7 @@
  * 环境变量（必填）：
  *   SESSDATA / BILI_JCT
  * 可选：
- *   MAX_LIGHT   每次最多点亮多少枚牌子，默认 200（实际等于不限）
+ *   MAX_LIGHT   每次最多点亮多少枚牌子，默认 40（× DELAY_MS 2s ≈ 80 秒/账号）
  *   DELAY_MS    请求间隔毫秒，默认 2000
  *   DRY_RUN     =1 时只打印计划，不发请求
  */
@@ -28,7 +28,7 @@ import { digestOf, renderDigest, accountHead } from './lib/pushfmt.mjs';
 const CFG = {
   SESSDATA: process.env.SESSDATA || '',
   BILI_JCT: process.env.BILI_JCT || '',
-  MAX_LIGHT: Number(process.env.MAX_LIGHT || 200),
+  MAX_LIGHT: Number(process.env.MAX_LIGHT || 40),
   DELAY_MS: Number(process.env.DELAY_MS || 2000),
   DRY: process.env.DRY_RUN === '1',
   // 推送
@@ -219,7 +219,7 @@ async function pushLoginQr(acctNo) {
     }
     const dataUri = await makeQrDataUri(gen.data.url);
     const cmd = `node scripts/qr-login.mjs --acct ${acctNo} --push`;
-    const html = dataUri
+    const bodyHtml = dataUri
       ? `<div style="font-size:14px;line-height:1.7">
 <p><b>账号 ${acctNo} 的 cookie 已失效</b>，今天没能跑任务。</p>
 <p>下面是登录二维码，<b>3 分钟内有效</b>，用 B 站手机客户端「扫一扫」：</p>
@@ -229,6 +229,15 @@ async function pushLoginQr(acctNo) {
 <p style="color:#888;font-size:12px">二维码过期了也不用重跑这条推送，直接在电脑上执行上面的命令会生成新的。</p>
 </div>`
       : `<div>账号 ${acctNo} 的 cookie 已失效。请在电脑上执行：<br><code>${cmd}</code></div>`;
+
+    // 掉线告警是最需要「哪天、哪个跑批发现的」的一条，页脚不能漏
+    const foot = buildFooter()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const html = `${bodyHtml}
+<hr style="border:none;border-top:1px solid #ddd;margin:14px 0 8px">
+<pre style="font-size:12px;color:#888;white-space:pre-wrap;margin:0;font-family:inherit">${foot}</pre>`;
 
     const res = await fetch('https://www.pushplus.plus/send', {
       method: 'POST',
@@ -253,17 +262,23 @@ async function pushLoginQr(acctNo) {
 // ────────────────────────────── 登录 & 准备 ──────────────────────────────
 
 async function checkLogin() {
+  let nav;
   try {
-    const nav = await http('https://api.bilibili.com/x/web-interface/nav', {
+    // retry: 2 —— 一次超时或 5xx 不该被判成「cookie 失效」。
+    // 以前 retry: 0 且把异常和 code!=0 一起归为 null，结果是网络抖一下
+    // 就推一条「账号掉线，扫码恢复」的假警报，这个号当天任务也全不跑。
+    nav = await http('https://api.bilibili.com/x/web-interface/nav', {
       referer: 'https://www.bilibili.com/',
-      retry: 0,
+      retry: 2,
     });
-    if (nav.code === 0 && nav.data && nav.data.isLogin) return nav;
-    log(`  \u26a0\ufe0f  \u767b\u5f55\u6821\u9a8c\u5931\u8d25 code=${nav.code} ${nav.message}`);
   } catch (e) {
-    warn('  \u26a0\ufe0f  \u767b\u5f55\u6821\u9a8c\u5f02\u5e38:', e.message);
+    // 连不上 != 凭据失效：抛出去，bootstrap 就不会走「推二维码」那条路
+    throw new Error(`登录校验请求失败（网络问题，不是 cookie 失效）：${e.message}`);
   }
-  return null;
+  if (nav.code === 0 && nav.data && nav.data.isLogin) return nav;
+  // 只有明确的「未登录」才算掉线
+  if (nav.code === -101 || (nav.data && nav.data.isLogin === false)) return null;
+  throw new Error(`登录校验返回异常 code=${nav.code} ${nav.message || nav.msg || ''}`.trim());
 }
 
 async function bootstrap() {
@@ -297,7 +312,9 @@ async function bootstrap() {
   const authState = readJsonFile(statePath('auth.json'), {});
   if (authState.fingerprint !== fp) {
     authState.fingerprint = fp;
-    authState.firstAuthDate = new Date().toISOString().slice(0, 10);
+    // 北京时间：cron 在 UTC 16:05（北京 00:05）跑，用 UTC 日期会比实际早一天，
+    // 而且这个值只在 fingerprint 变化时重写，一旦写错就一直错着。
+    authState.firstAuthDate = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
     writeJsonFile(statePath('auth.json'), authState);
     log(`  \U0001f4dd \u65b0\u51ed\u636e\uff0c\u8ba4\u8bc1\u65e5\u671f\u8bb0\u4e3a ${authState.firstAuthDate}`);
   }
@@ -365,9 +382,17 @@ async function taskVipPrivilege(isVip) {
   let list = [];
   try {
     const my = await http('https://api.bilibili.com/x/vip/privilege/my', { referer: 'https://www.bilibili.com/' });
-    if (my.code === 0 && my.data && Array.isArray(my.data.list)) list = my.data.list;
+    if (my.code === 0 && my.data && Array.isArray(my.data.list)) {
+      list = my.data.list;
+    } else {
+      // 查询失败不等于「没有可领权益」。以前静默置空，汇总里失败数还是 0，
+      // 推送写「当前无可领权益」，实际是接口挂了。
+      stat.fail++;
+      warn(`  ⚠️  取权益列表失败 code=${my.code} ${my.msg || my.message || ''}`);
+    }
   } catch (e) {
-    warn('  ⚠️  取权益列表失败:', e.message);
+    stat.fail++;
+    warn('  ⚠️  取权益列表异常:', e.message);
     return;
   }
 
@@ -461,7 +486,12 @@ async function getMedals() {
   let all = [];
   for (let page = 1; page <= 20; page++) {
     const r = await http(`https://api.live.bilibili.com/xlive/app-ucenter/v1/fansMedal/panel?page=${page}&page_size=50`);
-    if (r.code !== 0 || !r.data) break;
+    if (r.code !== 0 || !r.data) {
+      // 以前这里直接 break：风控(-352/-412)、-101、接口改版都会被当成
+      // 「这个号没有勋章」，推送写「没有勋章」而实际一块都没跑。
+      // 翻页中途出错更糟——只点亮了一半却报「已全部处理」。
+      throw new Error(`勋章列表第 ${page} 页 code=${r.code} ${r.message || r.msg || ''}`.trim());
+    }
     if (Array.isArray(r.data.list)) all = all.concat(r.data.list);
     if (Array.isArray(r.data.special_list)) all = all.concat(r.data.special_list);
     const pi = r.data.page_info || {};
@@ -486,6 +516,8 @@ async function taskMedalLight() {
   try {
     medals = await getMedals();
   } catch (e) {
+    // 取不到列表要计失败，否则汇总里「失败 0」而实际整块没跑
+    stat.fail++;
     warn('  ⚠️  取勋章列表失败:', e.message);
     return;
   }
@@ -554,10 +586,13 @@ async function taskSilver2Coin() {
   try {
     st = await http('https://api.live.bilibili.com/pay/v1/Exchange/getStatus');
   } catch (e) {
-    warn('  ⚠️  查兑换状态失败:', e.message);
+    // 查询失败要计失败：以前只 warn 就 return，汇总里失败数还是 0，监控看不出来
+    stat.fail++;
+    warn('  ⚠️  查兑换状态异常:', e.message);
     return;
   }
   if (st.code !== 0 || !st.data) {
+    stat.fail++;
     warn(`  ⚠️  查兑换状态异常 code=${st.code} ${st.message}`);
     return;
   }
@@ -600,11 +635,13 @@ async function taskWatchShare() {
   try {
     const rcm = await http('https://api.bilibili.com/x/web-interface/index/top/rcmd', { referer: 'https://www.bilibili.com/' });
     if (rcm.code !== 0 || !rcm.data || !Array.isArray(rcm.data.item) || !rcm.data.item.length) {
-      log(`  ⏭️  取推荐视频失败（code=${rcm.code}），跳过`);
+      stat.fail++;
+      warn(`  ⚠️  取推荐视频失败 code=${rcm.code}，这块没跑`);
       return;
     }
     item = rcm.data.item[0];
   } catch (e) {
+    stat.fail++;
     warn('  ⚠️  取推荐视频异常:', e.message);
     return;
   }
@@ -719,9 +756,14 @@ async function main() {
 
   /* Actions 运行页也留一份完整日志，推送里放不下的细节去这里看 */
   if (process.env.GITHUB_STEP_SUMMARY) {
-    const md = ['## B站每日任务', '', '```', `合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`];
+    // 围栏顺序要对：以前标题被塞进 ``` 里面，运行页渲染成一大坨裸文本
+    const md = [
+      '## B站每日任务',
+      '',
+      `> 合计：成功 ${totalOk}｜跳过 ${totalSkip}｜失败 ${totalFail}｜耗时 ${sec}s`,
+    ];
     results.forEach((r, i) => {
-      md.push('', `### ${i + 1}. ${r.name}`, '```');
+      md.push('', `### ${i + 1}. ${r.name}`, '', '```');
       md.push(...(r.detail || []).map((x) => String(x)));
       md.push('```');
     });

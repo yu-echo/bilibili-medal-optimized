@@ -1261,12 +1261,22 @@ const BilibiliAPI = {
             url: settings.url,
             method: settings.method || 'GET',
             crossDomain: true,
-            dataType: settings.dataType || 'json'
+            dataType: settings.dataType || 'json',
+            // jQuery 默认 timeout=0 表示永不超时。几个挂住的请求就能把
+            // processing 占满，后面所有接口一直排队空转（界面还在，任务全停）。
+            timeout: settings.timeout || 15000
         });
         const p = jQuery.Deferred();
+        const queuedAt = Date.now();
         BilibiliAPI.runUntilSucceed(() => {
-            if (BilibiliAPI.processing > 8)
+            if (BilibiliAPI.processing > 8) {
+                // 队列堵死时的兜底：等太久就放弃，别让调用方永远悬着
+                if (Date.now() - queuedAt > 60000) {
+                    p.reject({ status: 0, statusText: 'queue timeout' }, 'timeout');
+                    return true;
+                }
                 return false;
+            }
             ++BilibiliAPI.processing;
             return jQuery.ajax(settings).then((arg1, arg2, arg3) => {
                 --BilibiliAPI.processing;
@@ -1585,6 +1595,11 @@ class RoomHeart {
     async savePatchData() {
         if (this.seq > this.Dotime)
             return;
+        // 唯一停止条件是 seq > Dotime，可心跳一断 seq 就不动了 →
+        // 这个 15 秒自循环会一直跑下去。加个硬上限兜底（15s × 480 ≈ 2 小时）。
+        this._patchRounds = (this._patchRounds || 0) + 1;
+        if (this._patchRounds > 480)
+            return;
         const t = {
             id: JSON.stringify(this.id),
             device: JSON.stringify(this.device),
@@ -1656,12 +1671,18 @@ class RoomHeart {
             mode: "cors",
             credentials: "include"
         }).then((t => t.json())).catch(() => ({ code: -1 }));
-        0 === s.code && (this.seq += 1, ({
+        0 === s.code ? (this.seq += 1, ({
             heartbeat_interval: this.heartBeatInterval,
             secret_key: this.secretKey,
             secret_rule: this.secretRule,
             timestamp: this.timestamp
-        } = s.data), setTimeout((() => this.x()), 1e3 * this.heartBeatInterval))
+        } = s.data), this._hbFail = 0, setTimeout((() => this.x()), 1e3 * this.heartBeatInterval)) : (
+            // 非 0 以前什么都不做：心跳链断在这里，但界面照旧显示「挂机中」，
+            // 后台还留着每 15 秒一次的 savePatchData 自循环，用户看不到任何报错。
+            this._hbFail = (this._hbFail || 0) + 1,
+            console.warn(`[勋章] 心跳被拒 code=${s.code}${s.message ? ' ' + s.message : ''}（第 ${this._hbFail} 次）`),
+            this._hbFail <= 3 ? setTimeout((() => this.x()), 30000) : console.warn('[勋章] 心跳连续失败，停止挂机')
+        )
     }
     sypder(t, e) {
         const i = JSON.parse(t),

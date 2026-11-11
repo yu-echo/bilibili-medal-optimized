@@ -13,9 +13,9 @@ on:
         type: boolean
         default: false
       max_light:
-        description: '本次最多点亮多少枚牌子（200 = 不限）'
+        description: '本次最多点亮多少枚牌子（默认 40，约 80 秒/账号；调大要同步放宽 timeout）'
         type: string
-        default: '200'
+        default: '40'
 
 permissions:
   contents: write
@@ -27,8 +27,10 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest
-    # 直播挂机下线后整套只要 2~3 分钟（点亮 200 枚 × 2 秒间隔），
-    # 15 分钟是给「牌子特别多 / 网络抽风 / 接口重试」留的余量，不是常规耗时。
+    # 常规 ~1 分钟（2 个账号 × 点亮 40 枚 × 2 秒间隔）。
+    # 15 分钟是给「牌子特别多 / 网络抽风 / 接口重试」留的余量。
+    # 注意：一旦被 timeout 杀掉，后面的 push 根本不会执行，那天一条推送都没有。
+    # 所以想调大 MAX_LIGHT 就要同步放宽这里，别让「点亮」吃光预算。
     timeout-minutes: 15
 
     steps:
@@ -40,7 +42,11 @@ jobs:
         with:
           node-version: '20'
 
-      # cookie 和认证日期缓存在这里，跨运行复用；cookie 失效时推送会提示重新扫码
+      # cookie 和认证日期缓存在这里，跨运行复用；cookie 失效时推送会提示重新扫码。
+      # key 必须带 run_id（cache 一旦写入不可改），靠 restore-keys 前缀接上昨天的，
+      # 所以每次运行都会新建一份 —— 这是官方推荐用法，旧份由 GitHub 自动淘汰。
+      # 注意：实际只有 acctN_auth.json（首次认证日期）会被写入；
+      # acctN_cookie.json 没有写入方，cookie 还是走 Secrets。
       - name: 恢复 cookie 缓存
         uses: actions/cache@v4
         with:
@@ -61,7 +67,7 @@ jobs:
           SESSDATA_2: ${{ secrets.SESSDATA_2 }}
           BILI_JCT_2: ${{ secrets.BILI_JCT_2 }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          MAX_LIGHT: ${{ inputs.max_light || '200' }}
+          MAX_LIGHT: ${{ inputs.max_light || '40' }}
           DELAY_MS: '2000'
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: node scripts/daily.mjs
